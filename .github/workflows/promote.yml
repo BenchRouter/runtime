@@ -17,6 +17,7 @@ concurrency:
 
 env:
   RUNTIME_ORIGIN: https://runtime.benchrouter.com
+  RUNTIME_API: https://api.benchrouter.com
   R2_ENDPOINT: https://62c2c90bdee710b6fef8a69fae75659b.r2.cloudflarestorage.com
   R2_BUCKET: benchrouter-runtime
 
@@ -44,6 +45,8 @@ jobs:
           set -euo pipefail
           version="${GITHUB_REF_NAME#runtime-v}"
           node scripts/release.mjs verify --origin "$RUNTIME_ORIGIN" --version "$version"
+          # Refuse a revoked, unknown or retired-key release.
+          node scripts/release.mjs check-status --origin "$RUNTIME_ORIGIN" --api "$RUNTIME_API" --version "$version"
           printf '{"protocol_major":1,"manifest_path":"v1/releases/%s/manifest.json"}\n' "$version" > pointer.json
           cat pointer.json
       - name: Write the pointer

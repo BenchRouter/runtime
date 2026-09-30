@@ -299,7 +299,68 @@ async function cmdVerify() {
   );
 }
 
-const commands = { build: cmdBuild, sign: cmdSign, "remote-state": cmdRemoteState, verify: cmdVerify };
+function apiOf(a) {
+  const api = new URL(need(a, "api"));
+  if (api.protocol !== "https:" || api.pathname !== "/" || api.search) fail("--api must be a bare https origin");
+  return api.origin;
+}
+
+// The digest the published manifest signs, after the same checks as verify.
+async function publishedDigest(origin, version) {
+  const envelopeBytes = await get(`${origin}/${manifestPath(version)}`);
+  const artifact = await get(`${origin}/${artifactPath(version)}`);
+  if (!envelopeBytes || !artifact) fail(`release ${version} is not complete at ${origin}`);
+  const m = checkEnvelope(JSON.parse(envelopeBytes.toString("utf8")), artifact, version, releaseKeys());
+  return { digest: m.digest, envelopeBytes };
+}
+
+async function releaseStatus(api, digest) {
+  const res = await fetch(`${api}/v1/runner/release-status?digest=${encodeURIComponent(digest)}`, { redirect: "error", cache: "no-store" });
+  if (res.status !== 200) fail(`release-status returned ${res.status}`);
+  return res.json();
+}
+
+// Registers the published manifest with the API (RUN-003; the signature is the
+// authority, so no credential is sent) and requires the digest to be allowed.
+async function cmdRegister() {
+  const a = args();
+  const origin = originOf(a);
+  const api = apiOf(a);
+  const version = checkVersion(need(a, "version"));
+  const { digest, envelopeBytes } = await publishedDigest(origin, version);
+  const res = await fetch(`${api}/v1/runner/releases`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: envelopeBytes,
+    redirect: "error",
+  });
+  const body = await res.text();
+  if (res.status !== 200) fail(`registration returned ${res.status}: ${body.slice(0, 300)}`);
+  const status = await releaseStatus(api, digest);
+  if (status.outcome !== "allowed") fail(`release-status for ${digest} is ${status.outcome}`);
+  summary(`Registered ${version} (${digest}) with ${api}: allowed.`);
+}
+
+// Refuses unless the API reports the published digest as allowed.
+async function cmdCheckStatus() {
+  const a = args();
+  const origin = originOf(a);
+  const api = apiOf(a);
+  const version = checkVersion(need(a, "version"));
+  const { digest } = await publishedDigest(origin, version);
+  const status = await releaseStatus(api, digest);
+  if (status.outcome !== "allowed") fail(`release-status for ${digest} is ${status.outcome}; refusing`);
+  summary(`release-status for ${version} (${digest}): allowed.`);
+}
+
+const commands = {
+  build: cmdBuild,
+  sign: cmdSign,
+  "remote-state": cmdRemoteState,
+  verify: cmdVerify,
+  register: cmdRegister,
+  "check-status": cmdCheckStatus,
+};
 const command = commands[process.argv[2]];
 if (!command) fail(`usage: release.mjs <${Object.keys(commands).join("|")}> [--flag value ...]`);
 await command();

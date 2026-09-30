@@ -20,6 +20,7 @@ concurrency:
 
 env:
   RUNTIME_ORIGIN: https://runtime.benchrouter.com
+  RUNTIME_API: https://api.benchrouter.com
   R2_ENDPOINT: https://62c2c90bdee710b6fef8a69fae75659b.r2.cloudflarestorage.com
   R2_BUCKET: benchrouter-runtime
 
@@ -106,3 +107,6 @@ jobs:
             --body signed/manifest.json --content-type "application/json" --cache-control "$immutable" > /dev/null
       - name: Verify from the public origin
         run: node scripts/release.mjs verify --origin "$RUNTIME_ORIGIN" --version "$VERSION" --expected-digest "$BUILD_DIGEST"
+      # The API records the digest as allowed only after it verifies the signature itself.
+      - name: Register with the API
+        run: node scripts/release.mjs register --origin "$RUNTIME_ORIGIN" --api "$RUNTIME_API" --version "$VERSION"
