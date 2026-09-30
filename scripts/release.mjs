@@ -311,13 +311,18 @@ async function publishedDigest(origin, version) {
   const artifact = await get(`${origin}/${artifactPath(version)}`);
   if (!envelopeBytes || !artifact) fail(`release ${version} is not complete at ${origin}`);
   const m = checkEnvelope(JSON.parse(envelopeBytes.toString("utf8")), artifact, version, releaseKeys());
-  return { digest: m.digest, envelopeBytes };
+  return { digest: m.digest, keyId: m.key_id, envelopeBytes };
 }
 
-async function releaseStatus(api, digest) {
+// The same rule as the bootstrap (§6.2 R4): "allowed" counts only when the
+// manifest's key is not in retired_key_ids.
+async function requireAllowed(api, digest, keyId) {
   const res = await fetch(`${api}/v1/runner/release-status?digest=${encodeURIComponent(digest)}`, { redirect: "error", cache: "no-store" });
   if (res.status !== 200) fail(`release-status returned ${res.status}`);
-  return res.json();
+  const status = await res.json();
+  if (status.outcome !== "allowed") fail(`release-status for ${digest} is ${status.outcome}; refusing`);
+  if (!Array.isArray(status.retired_key_ids)) fail("release-status has no retired_key_ids list; refusing");
+  if (status.retired_key_ids.includes(keyId)) fail(`release ${digest} is signed by retired key ${keyId}; refusing`);
 }
 
 // Registers the published manifest with the API (RUN-003; the signature is the
@@ -327,7 +332,7 @@ async function cmdRegister() {
   const origin = originOf(a);
   const api = apiOf(a);
   const version = checkVersion(need(a, "version"));
-  const { digest, envelopeBytes } = await publishedDigest(origin, version);
+  const { digest, keyId, envelopeBytes } = await publishedDigest(origin, version);
   const res = await fetch(`${api}/v1/runner/releases`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -336,8 +341,7 @@ async function cmdRegister() {
   });
   const body = await res.text();
   if (res.status !== 200) fail(`registration returned ${res.status}: ${body.slice(0, 300)}`);
-  const status = await releaseStatus(api, digest);
-  if (status.outcome !== "allowed") fail(`release-status for ${digest} is ${status.outcome}`);
+  await requireAllowed(api, digest, keyId);
   summary(`Registered ${version} (${digest}) with ${api}: allowed.`);
 }
 
@@ -347,9 +351,8 @@ async function cmdCheckStatus() {
   const origin = originOf(a);
   const api = apiOf(a);
   const version = checkVersion(need(a, "version"));
-  const { digest } = await publishedDigest(origin, version);
-  const status = await releaseStatus(api, digest);
-  if (status.outcome !== "allowed") fail(`release-status for ${digest} is ${status.outcome}; refusing`);
+  const { digest, keyId } = await publishedDigest(origin, version);
+  await requireAllowed(api, digest, keyId);
   summary(`release-status for ${version} (${digest}): allowed.`);
 }
 
