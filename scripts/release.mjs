@@ -112,18 +112,23 @@ function releaseKeys() {
   return keys;
 }
 
+// The whole tracked tree is copied, because the mirrored runtime imports files
+// outside runtime/ (runtime/MIRROR.txt lists them at their original paths).
+const SKIP_TOP = new Set([".git", "out", "signed", "artifact"]);
+
 function buildOnce(workDir) {
-  const source = join(ROOT, "runtime");
-  cpSync(source, workDir, {
+  cpSync(ROOT, workDir, {
     recursive: true,
     filter: (src) => {
-      const parts = relative(source, src).split(sep);
-      return !parts.includes("node_modules") && parts[0] !== "dist";
+      const parts = relative(ROOT, src).split(sep);
+      if (SKIP_TOP.has(parts[0]) || parts.includes("node_modules")) return false;
+      return !(parts[0] === "runtime" && parts[1] === "dist");
     },
   });
-  execFileSync("npm", ["ci", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: workDir, stdio: "inherit" });
-  execFileSync("npm", ["run", "build"], { cwd: workDir, stdio: "inherit" });
-  return readFileSync(join(workDir, "dist", "runtime.mjs"));
+  const runtimeDir = join(workDir, "runtime");
+  execFileSync("npm", ["ci", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: runtimeDir, stdio: "inherit" });
+  execFileSync("npm", ["run", "build"], { cwd: runtimeDir, stdio: "inherit" });
+  return readFileSync(join(runtimeDir, "dist", "runtime.mjs"));
 }
 
 function cmdBuild() {
