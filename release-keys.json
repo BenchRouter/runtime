@@ -1,0 +1,15 @@
+{
+  "current": {
+    "slot": "A",
+    "key_id": "ed25519:bc6d108664536c66",
+    "alg": "ed25519",
+    "public_key": "PSjP3kWHeMcd3rCrCxTe9tQM/uxRelVTGPoNqse/NAc="
+  },
+  "next": {
+    "slot": "B",
+    "key_id": "ed25519:8fa3fed1014f0263",
+    "alg": "ed25519",
+    "public_key": "OQCD0UlpmyVgseR+CYdVmDjo4oHpzxbuNzZtZmupyBM="
+  },
+  "retired": []
+}

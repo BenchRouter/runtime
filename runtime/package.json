@@ -1,0 +1,14 @@
+{
+  "name": "@benchrouter/runtime",
+  "version": "0.0.0-placeholder.1",
+  "private": true,
+  "type": "module",
+  "description": "PLACEHOLDER. Proves the signing pipeline end to end. It is not a runtime and no pointer selects it.",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "benchrouter": {
+    "protocol_major": 1,
+    "features": []
+  }
+}

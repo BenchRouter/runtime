@@ -1,0 +1,55 @@
+# Move the runtime pointer (GET <origin>/v1/pointer) to a published release.
+# Run it on the release tag: `gh workflow run promote.yml --repo BenchRouter/runtime --ref runtime-v<version>`.
+# The environment admits only runtime-v* tags and needs patelnav or mrtron to
+# approve. Rollback is the same command on an older, unrevoked, unexpired tag.
+# This job never signs; it verifies the published release before it points at it.
+name: Promote runtime
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-pointer
+  cancel-in-progress: false
+
+env:
+  RUNTIME_ORIGIN: https://runtime.benchrouter.com
+  R2_ENDPOINT: https://62c2c90bdee710b6fef8a69fae75659b.r2.cloudflarestorage.com
+  R2_BUCKET: benchrouter-runtime
+
+jobs:
+  promote:
+    name: Move pointer (approval required)
+    if: startsWith(github.ref, 'refs/tags/runtime-v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: runtime-signing
+      url: ${{ env.RUNTIME_ORIGIN }}/v1/pointer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Verify the release on the origin
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#runtime-v}"
+          node scripts/release.mjs verify --origin "$RUNTIME_ORIGIN" --version "$version"
+          printf '{"protocol_major":1,"manifest_path":"v1/releases/%s/manifest.json"}\n' "$version" > pointer.json
+          cat pointer.json
+      - name: Write the pointer
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+        run: |
+          aws s3api put-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" --key v1/pointer \
+            --body pointer.json --content-type application/json --cache-control "public, max-age=60" > /dev/null

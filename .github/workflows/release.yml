@@ -1,0 +1,108 @@
+# Signed runtime release. Push a tag `runtime-v<version>` that equals
+# runtime/package.json "version". Only org admins can create those tags (tag
+# ruleset). The build job has no secrets. The publish job runs in the
+# `runtime-signing` environment: it waits for patelnav or mrtron to approve,
+# then re-checks the artifact digest against the build output, signs the
+# manifest, and uploads both files to the runtime origin. It never moves the
+# pointer; promote.yml does that.
+name: Release runtime
+
+on:
+  push:
+    tags: ["runtime-v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RUNTIME_ORIGIN: https://runtime.benchrouter.com
+  R2_ENDPOINT: https://62c2c90bdee710b6fef8a69fae75659b.r2.cloudflarestorage.com
+  R2_BUCKET: benchrouter-runtime
+
+jobs:
+  build:
+    name: Build (no secrets)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.build.outputs.version }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - id: build
+        run: node scripts/release.mjs build --tag "$GITHUB_REF_NAME" --out out
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: runtime-${{ steps.build.outputs.version }}
+          path: out/runtime.mjs
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Sign and publish (approval required)
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: runtime-signing
+      url: ${{ env.RUNTIME_ORIGIN }}/v1/releases/${{ needs.build.outputs.version }}/manifest.json
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      BUILD_DIGEST: ${{ needs.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: runtime-${{ needs.build.outputs.version }}
+          path: artifact
+      - id: keys
+        run: echo "slot=$(node -p 'require("./release-keys.json").current.slot')" >> "$GITHUB_OUTPUT"
+      - id: remote
+        run: node scripts/release.mjs remote-state --origin "$RUNTIME_ORIGIN" --version "$VERSION"
+      # A manifest already on the origin means an earlier attempt finished; the
+      # verify step below still requires it to cover this build's digest.
+      - name: Sign manifest
+        if: steps.remote.outputs.manifest != 'true'
+        run: node scripts/release.mjs sign --artifact artifact/runtime.mjs --expected-digest "$BUILD_DIGEST" --out signed
+        env:
+          SIGNING_KEY: ${{ secrets[format('RUNTIME_SIGNING_KEY_{0}', steps.keys.outputs.slot)] }}
+      - name: Upload to the runtime origin
+        if: steps.remote.outputs.manifest != 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+          EXISTING_ARTIFACT: ${{ steps.remote.outputs.artifact_digest }}
+        run: |
+          set -euo pipefail
+          prefix="v1/releases/$VERSION"
+          immutable="public, max-age=31536000, immutable"
+          # The bucket lock forbids overwriting v1/releases/ for 365 days, so an
+          # existing artifact must already be this build.
+          if [ -n "$EXISTING_ARTIFACT" ]; then
+            [ "$EXISTING_ARTIFACT" = "$BUILD_DIGEST" ] || { echo "origin holds $EXISTING_ARTIFACT, build is $BUILD_DIGEST"; exit 1; }
+          else
+            aws s3api put-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" --key "$prefix/runtime.mjs" \
+              --body artifact/runtime.mjs --content-type "text/javascript; charset=utf-8" --cache-control "$immutable" > /dev/null
+          fi
+          # The manifest goes last: a reader never sees a manifest without its artifact.
+          aws s3api put-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" --key "$prefix/manifest.json" \
+            --body signed/manifest.json --content-type "application/json" --cache-control "$immutable" > /dev/null
+      - name: Verify from the public origin
+        run: node scripts/release.mjs verify --origin "$RUNTIME_ORIGIN" --version "$VERSION" --expected-digest "$BUILD_DIGEST"
