@@ -439,12 +439,19 @@ function parseCases<Value>(value: Value): { ok: true; value: EvalFailureCasesDia
   return { ok: true, value: { planned: value.planned, succeeded, failed } };
 }
 
+/** RUN-001: the opaque 200-character case domain, without control characters. */
+function caseIdentity<Value>(value: Value): value is Value & string {
+  return text(value, MAX_ID, false) && !/[\t\n\r]/.test(value);
+}
+
 function parseSucceeded<Value>(value: Value): { ok: true; value: EvalSucceededCaseDiagnostic } | FailureDiagnosticInvalid {
   if (!isRecord(value) || unknownKey(value, new Set(["case_id", "model_call_ids"]))) {
     return invalid("Failure diagnostic succeeded case shape is invalid");
   }
+  // EVAL-011 / RUN-001: case IDs are opaque bounded identities, not error codes.
+  // The native repeat loader adds #repeat-2/3 to the authored identity.
   const caseId = value.case_id;
-  if (!text(caseId, MAX_ID, true)) return invalid("Failure diagnostic succeeded case_id is invalid");
+  if (!caseIdentity(caseId)) return invalid("Failure diagnostic succeeded case_id is invalid");
   if (!Array.isArray(value.model_call_ids) || value.model_call_ids.length === 0 || value.model_call_ids.length > MAX_CALL_IDS_PER_CASE) {
     return invalid("Failure diagnostic succeeded model_call_ids are invalid");
   }
@@ -461,8 +468,10 @@ function parseFailed<Value>(value: Value): { ok: true; value: EvalFailedCaseDiag
   if (!isRecord(value)) return invalid("Failure diagnostic failed case must be an object");
   const unknown = unknownKey(value, new Set(["case_id", "stage", "error_code", "cause_code", "cause_name", "message", "model_call_id", "latency_ms"]));
   if (unknown) return invalid(`Failure diagnostic failed case ${unknown} is not allowed`);
+  // EVAL-011 / RUN-001: case IDs are opaque bounded identities, not error codes.
+  // The native repeat loader adds #repeat-2/3 to the authored identity.
   const caseId = value.case_id;
-  if (!text(caseId, MAX_ID, true)) return invalid("Failure diagnostic failed case_id is invalid");
+  if (!caseIdentity(caseId)) return invalid("Failure diagnostic failed case_id is invalid");
   const stage = value.stage;
   if (!member(EVAL_CASE_FAILURE_STAGES, stage)) return invalid("Failure diagnostic failed stage is invalid");
   const errorCode = value.error_code;
