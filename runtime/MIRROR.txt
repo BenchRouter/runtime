@@ -1,4 +1,5 @@
 src/shared/runner-protocol.ts
+src/shared/replay-case-repeats.ts
 src/shared/json-parse-contracts.ts
 src/shared/parsing.ts
 src/shared/failure-codes.ts

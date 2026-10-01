@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { RunnerWorkMode } from "../../src/shared/runner-protocol";
+import { parseReplayCaseRepeatPolicy, type ReplayCaseRepeatPolicy } from "../../src/shared/replay-case-repeats";
 import { isJsonFiniteNumber, isJsonObject, isJsonString, ProtocolError, type JsonObject, type JsonValue } from "./json";
 
 export const MANIFEST_PATH = ".benchrouter/benchrouter.yml";
@@ -46,6 +47,7 @@ export interface ManifestRoute {
   scorerPath: string;
   resultSchema: string;
   caseRefs: string[];
+  caseRepeats: ReplayCaseRepeatPolicy | null;
   /** The committed route mapping, verbatim (snapshot `manifest_entry`). */
   entry: JsonObject;
 }
@@ -180,6 +182,11 @@ function parseRoute(value: JsonValue, index: number): ManifestRoute {
   // Fail closed (principle 5): an unknown mode never falls back to replay.
   const rawMode = pack.mode === undefined ? "isolated_replay" : requiredString(pack.mode, `${prefix}.eval_pack.mode`);
   if (rawMode !== "isolated_replay" && rawMode !== "repository_executable") fail(`${prefix}.eval_pack.mode`, "is unknown");
+  const repeats = parseReplayCaseRepeatPolicy(pack.case_repeats);
+  if (!repeats.ok) fail(`${prefix}.eval_pack`, repeats.message);
+  if (rawMode !== "isolated_replay" && repeats.policy !== null) {
+    fail(`${prefix}.eval_pack.case_repeats`, "applies only to isolated_replay evals");
+  }
   const executable = rawMode === "repository_executable" ? parseExecutable(pack, prefix) : null;
   // EVAL-014: the eval implementer declares the judge model. There is no default judge.
   const judgeModel = optionalString(pack.judge_model, `${prefix}.eval_pack.judge_model`);
@@ -198,6 +205,7 @@ function parseRoute(value: JsonValue, index: number): ManifestRoute {
     scorerPath: repoPath(pack.scorer, `${prefix}.eval_pack.scorer`),
     resultSchema: requiredString(pack.result_schema, `${prefix}.eval_pack.result_schema`),
     caseRefs,
+    caseRepeats: repeats.policy,
     entry
   };
 }

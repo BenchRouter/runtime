@@ -4,7 +4,8 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { RunnerRouteContract } from "../../src/shared/runner-protocol";
-import { isJsonObject, isJsonString, parseJsonText, ProtocolError, sha256Hex, type JsonObject, type JsonValue } from "./json";
+import { MAX_EXPANDED_REPLAY_CASES } from "../../src/shared/replay-case-repeats";
+import { isJsonFiniteNumber, isJsonObject, isJsonString, parseJsonText, ProtocolError, sha256Hex, type JsonObject, type JsonValue } from "./json";
 import type { ManifestRoute } from "./manifest";
 
 export interface ReplayCase {
@@ -63,7 +64,39 @@ export async function loadReplayCases(treeRoot: string, route: ManifestRoute): P
       cases.push({ id, version: `sha256:${sha256Hex(JSON.stringify(entry))}`, critical: entry.critical === true, endpoint, headers, body, raw: entry });
     }
   }
-  return cases;
+  const policy = route.caseRepeats;
+  if (policy === null) return cases;
+  const expanded: ReplayCase[] = [];
+  for (const testCase of cases) {
+    expanded.push(testCase);
+    const repeats = testCase.critical ? policy.critical : policy.noncritical;
+    if (repeats > 1) {
+      if (testCase.endpoint !== "/v1/chat/completions") {
+        throw new ProtocolError(`case ${JSON.stringify(testCase.id)} repeats require the chat completions seed contract`);
+      }
+      const input = testCase.raw.input;
+      if (input === undefined || !isJsonObject(input) || Object.keys(input).length === 0) {
+        throw new ProtocolError(`case ${JSON.stringify(testCase.id)} repeats require an authored input object`);
+      }
+      if (input.seed !== undefined && (!isJsonFiniteNumber(input.seed) || !Number.isSafeInteger(input.seed))) {
+        throw new ProtocolError(`case ${JSON.stringify(testCase.id)} has an unsafe authored seed`);
+      }
+      for (let index = 1; index < repeats; index += 1) {
+        const id = `${testCase.id}#repeat-${index + 1}`;
+        if (seen.has(id)) throw new ProtocolError(`expanded case id ${JSON.stringify(id)} collides with a declared or generated case`);
+        seen.add(id);
+        const seed = policy.seed_start + index - 1;
+        if (input.seed === seed) throw new ProtocolError(`case ${JSON.stringify(testCase.id)} repeats duplicate its authored seed`);
+        const repeatedInput: JsonObject = { ...input, seed };
+        const raw: JsonObject = { ...testCase.raw, id, input: repeatedInput, repeat_of: testCase.id, repeat_index: index + 1 };
+        expanded.push({ ...testCase, id, version: `sha256:${sha256Hex(JSON.stringify(raw))}`, body: repeatedInput, raw });
+      }
+    }
+    if (expanded.length > MAX_EXPANDED_REPLAY_CASES) {
+      throw new ProtocolError(`case repeats exceed ${MAX_EXPANDED_REPLAY_CASES} expanded cases`);
+    }
+  }
+  return expanded;
 }
 
 // ---------------------------------------------------------------------------

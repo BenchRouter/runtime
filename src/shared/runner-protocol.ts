@@ -139,7 +139,7 @@ export function parseRunnerWorkMode(value: JsonValue): RunnerWorkMode | null {
  * before any release advertises it: an unknown advertised name is a protocol error.
  * `case_subset` is reserved (§3.3.5): stage 1 never issues it.
  */
-export const RUNNER_FEATURE_CAPABILITIES = ["case_subset"] as const;
+export const RUNNER_FEATURE_CAPABILITIES = ["case_subset", "case_repeats"] as const;
 export type RunnerFeatureCapability = (typeof RUNNER_FEATURE_CAPABILITIES)[number];
 
 /**
