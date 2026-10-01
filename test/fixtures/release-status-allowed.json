@@ -1,0 +1,10 @@
+{
+  "url": "https://api.benchrouter.com/v1/runner/release-status?digest=sha256%3Ac4bab20899c244edf01c8acae04abbb212dd6121baca822c1875723b630c5cf8",
+  "status": 200,
+  "captured_at": "2026-10-01T22:42:00.415Z",
+  "body": {
+    "outcome": "allowed",
+    "digest": "sha256:c4bab20899c244edf01c8acae04abbb212dd6121baca822c1875723b630c5cf8",
+    "retired_key_ids": []
+  }
+}

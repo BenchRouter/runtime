@@ -1,0 +1,9 @@
+{
+  "url": "https://api.benchrouter.com/v1/runner/release-status?digest=sha256%3A0000000000000000000000000000000000000000000000000000000000000000",
+  "status": 200,
+  "captured_at": "2026-10-01T22:42:00.526Z",
+  "body": {
+    "outcome": "unknown",
+    "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}

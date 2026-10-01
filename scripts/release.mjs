@@ -5,6 +5,8 @@
 //   sign         --artifact <file> --expected-digest <sha256:..> --out <dir>   (SIGNING_KEY env = PKCS8 PEM)
 //   remote-state --origin <url> --version <v>
 //   verify       --origin <url> --version <v> [--expected-digest <sha256:..>]
+//   prepare-promotion --origin <url> --api <url> --version <v> --expected-digest <sha256:..> --out <file>
+//   verify-pointer --origin <url> --api <url> --version <v> --expected-digest <sha256:..>
 //
 // The manifest and envelope types are RuntimeReleaseManifest and
 // SignedRuntimeManifest in the benchrouter repo, src/shared/runner-protocol.ts.
@@ -155,7 +157,7 @@ function cmdBuild() {
     [
       `## Runtime build ${version}`,
       "",
-      "Approve the signing job only if this digest is the one you expect.",
+      "Approve signing, publication and promotion only if this version and digest are the ones you expect.",
       "",
       "| Field | Value |",
       "|---|---|",
@@ -321,6 +323,7 @@ async function requireAllowed(api, digest, keyId) {
   if (res.status !== 200) fail(`release-status returned ${res.status}`);
   const status = await res.json();
   if (status.outcome !== "allowed") fail(`release-status for ${digest} is ${status.outcome}; refusing`);
+  if (status.digest !== digest) fail("release-status returned a different digest; refusing");
   if (!Array.isArray(status.retired_key_ids)) fail("release-status has no retired_key_ids list; refusing");
   if (status.retired_key_ids.includes(keyId)) fail(`release ${digest} is signed by retired key ${keyId}; refusing`);
 }
@@ -356,6 +359,42 @@ async function cmdCheckStatus() {
   summary(`release-status for ${version} (${digest}): allowed.`);
 }
 
+// RUN-002: a single protected release job promotes only its approved build.
+// The workflow invokes this from current main, so current trust/retirement rules apply.
+async function approvedRelease(a) {
+  const origin = originOf(a);
+  const api = apiOf(a);
+  const version = checkVersion(need(a, "version"));
+  const expected = need(a, "expected-digest");
+  if (!/^sha256:[0-9a-f]{64}$/.test(expected)) fail("bad expected digest");
+  const { digest, keyId } = await publishedDigest(origin, version);
+  if (digest !== expected) fail(`published digest ${digest} is not the approved digest ${expected}`);
+  await requireAllowed(api, digest, keyId);
+  return { origin, version, digest };
+}
+
+async function cmdPreparePromotion() {
+  const a = args();
+  const out = need(a, "out");
+  // No pointer file is created until artifact/signature/current-key/API checks pass.
+  const { version, digest } = await approvedRelease(a);
+  writeFileSync(out, `${JSON.stringify({ protocol_major: PROTOCOL_MAJOR, manifest_path: manifestPath(version) })}\n`, { flag: "wx" });
+  summary(`Prepared promotion of ${version} (${digest}); publication and API status verified.`);
+}
+
+async function cmdVerifyPointer() {
+  const a = args();
+  const { origin, version, digest } = await approvedRelease(a);
+  // A query probe avoids reading the pointer's previous 60-second edge-cache entry.
+  const bytes = await get(`${origin}/v1/pointer?probe=${Date.now()}`);
+  if (!bytes) fail("the public pointer is missing");
+  const pointer = JSON.parse(bytes.toString("utf8"));
+  if (pointer.protocol_major !== PROTOCOL_MAJOR || pointer.manifest_path !== manifestPath(version)) {
+    fail("public pointer does not select the approved release");
+  }
+  summary(`Public pointer verified: ${version} (${digest}).`);
+}
+
 const commands = {
   build: cmdBuild,
   sign: cmdSign,
@@ -363,6 +402,8 @@ const commands = {
   verify: cmdVerify,
   register: cmdRegister,
   "check-status": cmdCheckStatus,
+  "prepare-promotion": cmdPreparePromotion,
+  "verify-pointer": cmdVerifyPointer,
 };
 const command = commands[process.argv[2]];
 if (!command) fail(`usage: release.mjs <${Object.keys(commands).join("|")}> [--flag value ...]`);
