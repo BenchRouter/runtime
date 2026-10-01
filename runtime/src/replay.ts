@@ -34,6 +34,7 @@ import {
 } from "./model-output";
 import { ScorerProcess, type JudgeBridge } from "./scorer-process";
 import { send, TransportError, type HttpReply, type TargetHolds } from "./transport";
+import { metricsChecks, type ReplayMetrics } from "./metrics";
 
 /** The Worker bounds each provider attempt; this slightly wider client deadline catches a lost response. */
 const MODEL_ATTEMPT_TIMEOUT_MS = 135_000;
@@ -46,6 +47,7 @@ const SETTLING_CODES = new Set(["call_in_progress", "call_outcome_unknown"]);
 
 /** A fault that ends the whole item, not one case. */
 export class ItemFault extends Error {
+  metrics?: ReplayMetrics[];
   constructor(readonly cause: RunnerWorkFailCause, message: string) {
     super(message);
   }
@@ -99,11 +101,12 @@ export interface UploadRow extends JsonObject {
 interface CaseResult {
   row: UploadRow;
   failure: EvalFailedCaseDiagnostic | null;
+  metrics: ReplayMetrics;
 }
 
 export type ItemOutcome =
-  | { kind: "upload"; rows: UploadRow[]; quality: JsonObject | null }
-  | { kind: "fail"; cause: RunnerWorkFailCause; diagnostics: JsonObject; providerOnly: boolean };
+  | { kind: "upload"; rows: UploadRow[]; quality: JsonObject | null; metrics?: ReplayMetrics[] }
+  | { kind: "fail"; cause: RunnerWorkFailCause; diagnostics: JsonObject; providerOnly: boolean; metrics?: ReplayMetrics[] };
 
 function encodeCallHeader(header: RunnerEvalCallHeader): string {
   return Buffer.from(canonicalJson(header), "utf8").toString("base64url");
@@ -148,6 +151,7 @@ export async function runReplayItem(env: ItemEnvironment): Promise<ItemOutcome> 
   const workDeadlineAt = Date.parse(item.work_deadline_at);
   const concurrency = Math.max(1, Math.min(item.limits.case_concurrency, cases.length));
   const scorers: ScorerProcess[] = [];
+  const results: CaseResult[] = [];
   // A lost lease, the work deadline or retirement kills every scorer child of the item at once.
   const stopScorers = () => { for (const scorer of scorers) void scorer.stop(); };
   env.signal.addEventListener("abort", stopScorers, { once: true });
@@ -158,7 +162,6 @@ export async function runReplayItem(env: ItemEnvironment): Promise<ItemOutcome> 
       if (!started.ok) throw new ItemFault("harness_failed", `the scorer failed to load (${started.errorCode})`);
       scorers.push(scorer);
     }
-    const results: CaseResult[] = [];
     let next = 0;
     const trial = 1;
     // §6.1 item 1: `case_concurrency` bounds the cases of one trial in flight at once,
@@ -178,13 +181,19 @@ export async function runReplayItem(env: ItemEnvironment): Promise<ItemOutcome> 
     }));
     if (env.signal.aborted) throw abortFault(env);
     const failed = results.map((result) => result.failure).filter((failure): failure is EvalFailedCaseDiagnostic => failure !== null);
-    if (failed.length === 0) return { kind: "upload", rows: results.map((result) => result.row), quality: null };
+    if (failed.length === 0) return { kind: "upload", rows: results.map((result) => result.row), quality: null, metrics: results.map(result => result.metrics) };
     return {
       kind: "fail",
       cause: "case_failures",
       diagnostics: caseFailureDiagnostic(results, failed),
-      providerOnly: failed.every((failure) => failure.stage === "model_call")
+      providerOnly: failed.every((failure) => failure.stage === "model_call"),
+      metrics: results.map(result => result.metrics)
     };
+  } catch (error) {
+    // Keep only cases that actually finished. An interrupted item contributes
+    // no invented rows for cases which did not execute.
+    if (error instanceof ItemFault) error.metrics = results.filter(Boolean).map(result => result.metrics);
+    throw error;
   } finally {
     env.signal.removeEventListener("abort", stopScorers);
     await Promise.all(scorers.map((scorer) => scorer.stop()));
@@ -211,6 +220,7 @@ async function runCase(env: ItemEnvironment, scorer: ScorerProcess, testCase: Re
     raw_output: null,
     judge_cost_usd: null
   };
+  let checks: ReturnType<typeof metricsChecks> = { checks: [], checks_omitted: false };
   let judgeSeq = 0;
   let judgeCost = 0;
   let judgeFailure: CaseFault | null = null;
@@ -269,6 +279,7 @@ async function runCase(env: ItemEnvironment, scorer: ScorerProcess, testCase: Re
       throw judgeFailure ?? new CaseFault("scorer", scored.errorCode === "sandbox_violation" ? EVAL_CASE_ERROR_CODE.sandboxViolation : EVAL_CASE_ERROR_CODE.scorerException, null, scored.causeName);
     }
     row.pass = scored.verdict.pass;
+    checks = metricsChecks(scored.verdict.checks);
     row.score = row.pass ? 1 : 0;
     if (!row.pass && judgeFailure) {
       // EVAL-011: the scorer turned a failed judge call into a rejection; the candidate was never judged.
@@ -288,10 +299,12 @@ async function runCase(env: ItemEnvironment, scorer: ScorerProcess, testCase: Re
   }
   row.judge_cost_usd = judgeCost > 0 ? judgeCost : null;
   if (row.latency_ms === null) row.latency_ms = positiveMs(Date.now() - started);
-  if (failure === null) return { row, failure: null };
+  const metrics: ReplayMetrics = { case_id: row.case_id, model: row.model, selected_model: row.selected_model, pass: row.pass, technical_failure: failure !== null, cost_usd: row.cost_usd, ...checks };
+  if (failure === null) return { row, failure: null, metrics };
   row.error = failure.message;
   return {
     row,
+    metrics,
     failure: {
       case_id: testCase.id.slice(0, 200),
       stage: failure.stage,
