@@ -1,14 +1,21 @@
 {
   "name": "@benchrouter/runtime",
-  "version": "0.0.0-placeholder.1",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "PLACEHOLDER. Proves the signing pipeline end to end. It is not a runtime and no pointer selects it.",
+  "description": "BenchRouter signed runtime for GitHub Actions eval jobs and local capture and calibrate (RUN-001).",
+  "license": "UNLICENSED",
   "scripts": {
     "build": "node build.mjs"
   },
   "benchrouter": {
     "protocol_major": 1,
     "features": []
+  },
+  "dependencies": {
+    "yaml": "2.9.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.27.3"
   }
 }
