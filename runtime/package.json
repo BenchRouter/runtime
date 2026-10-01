@@ -1,6 +1,6 @@
 {
   "name": "@benchrouter/runtime",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "private": true,
   "type": "module",
   "description": "BenchRouter signed runtime for GitHub Actions eval jobs and local capture and calibrate (RUN-001).",

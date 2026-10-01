@@ -221,7 +221,8 @@ async function runCase(env: ItemEnvironment, scorer: ScorerProcess, testCase: Re
     judge_cost_usd: null
   };
   let checks: ReturnType<typeof metricsChecks> = { checks: [], checks_omitted: false };
-  let judgeSeq = 0;
+  // RUN-001 F9: model seq is 0; judge operations start at 1.
+  let judgeSeq = 1;
   let judgeCost = 0;
   let judgeFailure: CaseFault | null = null;
   // EVAL-013: a truncated judge reply never judged the case, so no later outcome clears it.
