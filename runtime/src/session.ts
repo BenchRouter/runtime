@@ -29,6 +29,7 @@ import { hashDeclaredFiles, routeContract, sameHashes } from "./snapshot";
 import { JobSummary, type FailureClass } from "./summary";
 import { send, TargetHolds } from "./transport";
 import { readCommittedKit } from "./workflow";
+import { ReplayMetricsWriter, type MetricsTerminal } from "./metrics";
 
 /** Stop claiming when less than this remains before `retire_at` (the upload reserve is already inside retire_at). */
 const MIN_CLAIM_WINDOW_MS = 60_000;
@@ -297,6 +298,7 @@ async function claimLoop(
   stopRequested: () => boolean
 ): Promise<void> {
   const retireAt = Date.parse(hello.retire_at ?? "");
+  const metrics = new ReplayMetricsWriter(control.workspace);
   const running = new Map<string, Promise<void>>();
   let claimSeq = 0;
   let claimErrors = 0;
@@ -338,7 +340,7 @@ async function claimLoop(
               if (running.size > 0 || response.items.length > 1) refusal = new ItemFault("mode_unsupported", "executable work never shares a job with other work");
               stop = "an executable item runs alone in a fresh job";
             }
-            const promise = runItem(control, client, holds, heartbeat, prepared, item, summary, refusal).finally(() => running.delete(item.work_id));
+            const promise = runItem(control, client, holds, heartbeat, prepared, item, summary, refusal, metrics).finally(() => running.delete(item.work_id));
             running.set(item.work_id, promise);
           }
           if (response.items.length === 0) await waitForAny(1000);
@@ -393,7 +395,8 @@ async function runItem(
   prepared: Map<Sha256Digest, PreparedRoute>,
   item: RunnerWorkItem,
   summary: JobSummary,
-  refusal: ItemFault | null
+  refusal: ItemFault | null,
+  metrics: ReplayMetricsWriter
 ): Promise<void> {
   const lease = heartbeat.add(item);
   const deadlineTimer = setTimeout(() => lease.controller.abort(new ItemFault("deadline_exceeded", "the work deadline passed")), Math.max(0, Date.parse(item.work_deadline_at) - Date.now()));
@@ -404,12 +407,25 @@ async function runItem(
     outcome = await executeItem(control, holds, heartbeat, lease, prepared, item);
   } catch (error) {
     const fault = error instanceof ItemFault ? error : new ItemFault("runtime_error", errorMessage(error instanceof Error ? error : String(error)));
-    outcome = { kind: "fail", cause: fault.cause, diagnostics: { message: fault.message.slice(0, 500) }, providerOnly: false };
+    outcome = { kind: "fail", cause: fault.cause, diagnostics: { message: fault.message.slice(0, 500) }, providerOnly: false, metrics: fault.metrics };
   } finally {
     clearTimeout(deadlineTimer);
   }
   try {
-    await commit(control, client, item, outcome, summary, prepared.get(item.contract_digest)?.fileHashes ?? {});
+    const terminal = await commit(control, client, item, outcome, summary, prepared.get(item.contract_digest)?.fileHashes ?? {});
+    if (outcome.metrics) {
+      try {
+        await metrics.write(item.work_id, item.retry_attempt, item.lease_gen, outcome.metrics, terminal);
+        if (outcome.metrics.some(row => row.checks_omitted)) {
+          summary.note("Some local scorer diagnostics exceeded the export bound; customer metrics are incomplete.");
+          console.log("::warning title=BenchRouter metrics::Some scorer checks were omitted from local metrics.");
+        }
+      } catch {
+        // Diagnostic failure cannot change evaluation or imply a successful export.
+        summary.note("Local replay metrics could not be exported; customer metrics are incomplete.");
+        console.log("::warning title=BenchRouter metrics::Local replay metrics export failed or exceeded its bound.");
+      }
+    }
   } finally {
     heartbeat.remove(item.work_id);
   }
@@ -448,7 +464,7 @@ async function executeItem(
 }
 
 /** §3.3.1: one terminal write per item. A lost response is recovered from the receipt. */
-async function commit(control: ControlContext, client: RunnerClient, item: RunnerWorkItem, outcome: ItemOutcome, summary: JobSummary, fileHashes: Record<string, Sha256Digest>): Promise<void> {
+async function commit(control: ControlContext, client: RunnerClient, item: RunnerWorkItem, outcome: ItemOutcome, summary: JobSummary, fileHashes: Record<string, Sha256Digest>): Promise<MetricsTerminal> {
   try {
     if (outcome.kind === "upload") {
       const rows: JsonObject[] = outcome.rows;
@@ -467,22 +483,25 @@ async function commit(control: ControlContext, client: RunnerClient, item: Runne
       // §3.3.1: the server can commit the upload as a failure (its evidence could not be published).
       if (committed.receipt.terminal === "failed") {
         summary.failed(item.work_id, "upload_error", "infra", "the server recorded the upload as a failure");
-        return;
+        return "failed";
       }
       summary.uploaded(item.work_id, item.model_run.model, outcome.rows.length, outcome.rows.filter((row) => row.pass).length);
-      return;
+      return "uploaded";
     }
     await client.fail({ session_id: client.sessionId, work_id: item.work_id, lease_gen: item.lease_gen, retry_attempt: item.retry_attempt, cause: outcome.cause, diagnostics: outcome.diagnostics });
     summary.failed(item.work_id, outcome.cause, failureClass(outcome.cause, outcome.providerOnly), item.model_run.model);
+    return "failed";
   } catch (error) {
     if (error instanceof RunnerApiError && error.code === "work_terminal" && error.receipt) {
       summary.note(`work ${item.work_id} was already ${error.receipt.terminal}`);
-      return;
+      // A winning receipt need not describe these local observations.
+      return "unconfirmed";
     }
     if (error instanceof RunnerApiError && error.code === "fenced") {
       summary.failed(item.work_id, "lease_lost", "infra", "the server fenced the lease before the result committed");
-      return;
+      return "unconfirmed";
     }
     summary.failed(item.work_id, outcome.kind === "upload" ? "upload_error" : "fail_error", "infra", errorMessage(error instanceof Error ? error : String(error)));
+    return "unconfirmed";
   }
 }
