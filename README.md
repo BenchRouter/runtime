@@ -5,8 +5,9 @@ the program that the BenchRouter GitHub Actions workflow runs in a customer's
 repository. A small bootstrap in the customer's repository downloads it, verifies
 it, and runs it.
 
-**Status:** the current release is a placeholder. It proves the signing pipeline
-and does no work. No pointer selects it.
+Runtime releases execute admitted eval work, local capture, and calibration.
+The public pointer selects the promoted release; its value is verified by the
+bootstrap before execution.
 
 ## Where the files are
 
@@ -61,12 +62,39 @@ exist only as secrets of the `runtime-signing` environment of this repository.
 2. An organization admin pushes the tag `runtime-v<version>` on the merge commit.
 3. The **build** job builds `runtime/` twice from clean copies, requires identical
    bytes, and shows the sha256 digest in the job summary. It has no secrets.
-4. The **publish** job runs in the `runtime-signing` environment. It waits until
-   patelnav or mrtron approves it. It recomputes the digest, signs the manifest with
-   the current key, uploads the file and then the manifest, and verifies both from
-   the public origin.
-5. `promote.yml`, run on the release tag and approved in the same way, moves the
-   pointer to the release. Rollback is the same run on an older tag.
+4. One **sign, publish and promote** job runs in the `runtime-signing` environment.
+   The required reviewer approves the displayed version and reproducible digest
+   once. The job recomputes the digest, signs the manifest, uploads the artifact
+   and manifest, verifies the public bytes, and registers the digest with the API.
+5. In that same protected job, current main's trust and retirement policy verifies
+   the exact approved version and digest again. The API must report that digest
+   allowed with an unretired key. Only then does the job write the canonical
+   pointer and verify its public readback. A failure stops the job. A failure
+   before the pointer write leaves the current pointer unchanged; a failed
+   readback reports failure and requires inspection rather than automatic rollback.
+
+The protected release job and manual promotion share the `runtime-pointer`
+concurrency group. The secret-free build does not hold this lock. Pointer writers
+cannot run concurrently. `cancel-in-progress: false` preserves a running writer.
+GitHub keeps one pending writer by default; a later request replaces that pending
+request. Approval waiting and concurrency are separate controls, so this does not
+promise rollback priority. For an urgent rollback, an operator must inspect and
+cancel a waiting release if it blocks the rollback. Never bypass its approval or
+interrupt a running pointer write without checking its outcome.
+See [GitHub's concurrency rules](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency).
+
+Existing tag restrictions,
+required reviewers and environment secrets remain in force. No job approves
+its own environment or transfers an approval between jobs.
+
+`promote.yml` remains a separate protected operation for manual rollback or
+promotion of an already published release. It verifies with current main's
+trust policy and requires one approval for that operation.
+
+Tags created before this combined workflow retain their immutable old workflow.
+For example, `runtime-v1.0.2` finished with its existing protected manual promotion.
+Do not retag, re-sign, or overwrite an old release
+just to combine approvals. Future reviewed tags use the single protected job.
 
 ## Verify a release yourself
 

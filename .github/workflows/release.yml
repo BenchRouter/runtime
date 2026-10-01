@@ -3,8 +3,8 @@
 # ruleset). The build job has no secrets. The publish job runs in the
 # `runtime-signing` environment: it waits for patelnav or mrtron to approve,
 # then re-checks the artifact digest against the build output, signs the
-# manifest, and uploads both files to the runtime origin. It never moves the
-# pointer; promote.yml does that.
+# manifest, uploads both files, and moves the
+# pointer only after current-main trust and API allowlist verification pass.
 name: Release runtime
 
 on:
@@ -13,10 +13,6 @@ on:
 
 permissions:
   contents: read
-
-concurrency:
-  group: runtime-release-${{ github.ref_name }}
-  cancel-in-progress: false
 
 env:
   RUNTIME_ORIGIN: https://runtime.benchrouter.com
@@ -49,8 +45,13 @@ jobs:
           retention-days: 30
 
   publish:
-    name: Sign and publish (approval required)
+    name: Sign, publish and promote (one approval)
     needs: build
+    # Build has no pointer lock. Only the protected pointer writer shares it
+    # with standalone manual promotion and rollback.
+    concurrency:
+      group: runtime-pointer
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment:
@@ -110,3 +111,26 @@ jobs:
       # The API records the digest as allowed only after it verifies the signature itself.
       - name: Register with the API
         run: node scripts/release.mjs register --origin "$RUNTIME_ORIGIN" --api "$RUNTIME_API" --version "$VERSION"
+      # One protected job owns the complete operation. Re-read current main's
+      # trust policy before promotion, as the standalone rollback workflow does.
+      - name: Check out current promotion policy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          path: promotion-policy
+          persist-credentials: false
+      - name: Prepare the exact approved pointer
+        run: node promotion-policy/scripts/release.mjs prepare-promotion --origin "$RUNTIME_ORIGIN" --api "$RUNTIME_API" --version "$VERSION" --expected-digest "$BUILD_DIGEST" --out pointer.json
+      - name: Promote the approved release
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+        run: |
+          set -euo pipefail
+          aws s3api put-object --endpoint-url "$R2_ENDPOINT" --bucket "$R2_BUCKET" --key v1/pointer \
+            --body pointer.json --content-type application/json --cache-control "public, max-age=60" > /dev/null
+      - name: Verify the public pointer
+        run: node promotion-policy/scripts/release.mjs verify-pointer --origin "$RUNTIME_ORIGIN" --api "$RUNTIME_API" --version "$VERSION" --expected-digest "$BUILD_DIGEST"

@@ -25,6 +25,10 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
+      - name: Install frozen test dependencies
+        run: npm ci --prefix runtime --ignore-scripts --no-audit --no-fund
+      - name: Release verification contracts
+        run: node --test test/release-promotion.test.mjs
       - name: Build twice and compare bytes
         run: |
           set -euo pipefail
