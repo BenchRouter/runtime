@@ -417,7 +417,7 @@ async function runItem(
       try {
         await metrics.write(item.work_id, item.retry_attempt, item.lease_gen, outcome.metrics, terminal);
         if (outcome.metrics.some(row => row.checks_omitted)) {
-          summary.note("Some local scorer diagnostics exceeded the export bound; customer metrics are incomplete.");
+          summary.note("Some local scorer diagnostics had unsupported types or fields, control characters, or exceeded export limits; customer metrics are incomplete.");
           console.log("::warning title=BenchRouter metrics::Some scorer checks were omitted from local metrics.");
         }
       } catch {

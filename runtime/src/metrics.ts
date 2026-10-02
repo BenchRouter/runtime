@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { lstat, mkdir, open, realpath, rename, unlink } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
-import { isJsonString, type JsonValue } from "./json";
+import { isJsonBoolean, isJsonObject, isJsonString, type JsonValue } from "./json";
 
 export const METRICS_DIR = ".br-results";
 const MAX_CHECKS = 64;
@@ -25,9 +25,28 @@ export interface ReplayMetrics {
   checks_omitted: boolean;
 }
 
-/** Keep existing string diagnostics, with explicit loss when a scorer exceeds the bound. */
+function boundedCheckText(value: JsonValue | undefined): value is string {
+  return value !== undefined && isJsonString(value) && value.length <= MAX_CHECK_BYTES &&
+    Buffer.byteLength(value) <= MAX_CHECK_BYTES &&
+    [...value].every(character => character.charCodeAt(0) >= 32 && character.charCodeAt(0) !== 127);
+}
+
+function serializedCheck(check: JsonValue): string | null {
+  if (boundedCheckText(check)) return check;
+  if (!isJsonObject(check)) return null;
+  const keys = Object.keys(check);
+  if (keys.length !== 4 || keys.some(key => !["name", "pass", "detail", "code_ref"].includes(key))) return null;
+  if (!boundedCheckText(check.name) || !isJsonBoolean(check.pass) ||
+      !boundedCheckText(check.detail) || !boundedCheckText(check.code_ref)) return null;
+  // Local diagnostics only. Validate original fields before JSON escaping and
+  // bound the serialized record too; never export arbitrary nested scorer data.
+  const text = JSON.stringify({ name: check.name, pass: check.pass, detail: check.detail, code_ref: check.code_ref });
+  return boundedCheckText(text) ? text : null;
+}
+
+/** Preserve declared check records as strings, with explicit loss on unsafe or oversized data. */
 export function metricsChecks(checks: JsonValue[]): Pick<ReplayMetrics, "checks" | "checks_omitted"> {
-  const kept = checks.slice(0, MAX_CHECKS).filter((check): check is string => isJsonString(check) && check.length <= MAX_CHECK_BYTES && Buffer.byteLength(check) <= MAX_CHECK_BYTES && [...check].every(character => character.charCodeAt(0) >= 32 && character.charCodeAt(0) !== 127));
+  const kept = checks.slice(0, MAX_CHECKS).map(serializedCheck).filter((check): check is string => check !== null);
   return { checks: kept, checks_omitted: kept.length !== checks.length };
 }
 
