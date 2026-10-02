@@ -28,7 +28,7 @@ jobs:
       - name: Install frozen test dependencies
         run: npm ci --prefix runtime --ignore-scripts --no-audit --no-fund
       - name: Release verification contracts
-        run: node --test test/release-promotion.test.mjs
+        run: node --test test/release-promotion.test.mjs test/local-metrics.test.mjs
       - name: Build twice and compare bytes
         run: |
           set -euo pipefail
