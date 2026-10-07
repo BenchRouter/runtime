@@ -66,7 +66,9 @@ export const EVAL_RUN_FAILURE_REASON_CODES = [
   "cancelled",
   "orphaned_before_dispatch",
   // EVAL-011: the repository cannot run a server-dispatched eval (see `REPOSITORY_BLOCK_CODES`).
-  "repository_blocked"
+  "repository_blocked",
+  // RUN-001 §3.3.4: the run needs more time than one job gives, so no worker can run it.
+  "work_exceeds_job_window"
 ] as const;
 export type EvalRunFailureReasonCode = (typeof EVAL_RUN_FAILURE_REASON_CODES)[number];
 
@@ -211,6 +213,11 @@ export type ParseFailureDiagnosticResult =
   | { ok: false; message: string };
 
 const MAX_CASES = 256;
+/**
+ * A run can plan more cases than a diagnostic lists (case-batch leasing): `planned`
+ * is the run's case count, and the two case lists stay bounded by `MAX_CASES`.
+ */
+const MAX_PLANNED_CASES = 5000;
 const MAX_CALL_IDS_PER_CASE = 16;
 const MAX_ID = 200;
 const MAX_MESSAGE = 500;
@@ -400,7 +407,7 @@ function parseCases<Value>(value: Value): { ok: true; value: EvalFailureCasesDia
     !isJsonFiniteNumber(value.planned) ||
     !Number.isInteger(value.planned) ||
     value.planned < 0 ||
-    value.planned > MAX_CASES
+    value.planned > MAX_PLANNED_CASES
   ) {
     return invalid("Failure diagnostic cases.planned is invalid");
   }

@@ -10,6 +10,7 @@ import {
   RUNNER_EXIT_REASONS,
   RUNNER_IDEMPOTENCY_HEADER,
   RUNNER_RESULT_SET_TERMINAL_STATES,
+  RUNNER_SERVER_FEATURES,
   type RunnerAwaitingSnapshotOutcome,
   type RunnerBlockedOutcome,
   type RunnerClaimRequest,
@@ -120,7 +121,7 @@ function parseReceipt(value: JsonValue | undefined): RunnerReceipt {
     work_id: readString(receipt, "work_id", "receipt"),
     retry_attempt: readInteger(receipt, "retry_attempt", "receipt"),
     lease_gen: readInteger(receipt, "lease_gen", "receipt"),
-    terminal: oneOf(readString(receipt, "terminal", "receipt"), ["uploaded", "failed"] as const, "receipt.terminal"),
+    terminal: oneOf(readString(receipt, "terminal", "receipt"), ["uploaded", "failed", "accepted", "released"] as const, "receipt.terminal"),
     committed_at: readString(receipt, "committed_at", "receipt")
   };
 }
@@ -266,7 +267,12 @@ export class RunnerClient {
       lease_ttl_s: 90,
       idle_exit_s: readInteger(body, "idle_exit_s", "hello"),
       prepare_deadline_at: new Date(readTimestamp(body, "prepare_deadline_at", "hello")).toISOString(),
-      retire_at: retireAt === null ? null : new Date(readTimestamp(body, "retire_at", "hello")).toISOString()
+      retire_at: retireAt === null ? null : new Date(readTimestamp(body, "retire_at", "hello")).toISOString(),
+      // A server that predates the field lists nothing. A name this runtime does not
+      // know is a feature it does not use, so it is ignored.
+      server_features: body.server_features === undefined
+        ? []
+        : RUNNER_SERVER_FEATURES.filter((feature) => readStringList(body, "server_features", "hello").includes(feature))
     };
   }
 
@@ -340,12 +346,12 @@ export class RunnerClient {
 
   async upload(request: RunnerUploadRequest): Promise<RunnerTerminalResponse> {
     const auth = this.session();
-    return this.terminal(RUNNER_ENDPOINTS.upload, JSON.stringify(request), auth, `${request.work_id}:${request.retry_attempt}:upload`);
+    return this.terminal(RUNNER_ENDPOINTS.upload, JSON.stringify(request), auth, terminalKey(request, "upload"));
   }
 
   async fail(request: RunnerFailRequest): Promise<RunnerTerminalResponse> {
     const auth = this.session();
-    return this.terminal(RUNNER_ENDPOINTS.fail, JSON.stringify(request), auth, `${request.work_id}:${request.retry_attempt}:fail`);
+    return this.terminal(RUNNER_ENDPOINTS.fail, JSON.stringify(request), auth, terminalKey(request, "fail"));
   }
 
   /**
@@ -382,6 +388,13 @@ export class RunnerClient {
     if (outcome !== "committed") throw new ProtocolError("receipt outcome is unknown");
     return { outcome, receipt: parseReceipt(body.receipt) };
   }
+}
+
+/** §3.3.5: a batch call (one lease generation of a batched item) names its generation in its key. */
+function terminalKey(request: { work_id: string; retry_attempt: number; lease_gen: number; case_ids?: string[] }, endpoint: "upload" | "fail"): string {
+  return request.case_ids === undefined
+    ? `${request.work_id}:${request.retry_attempt}:${endpoint}`
+    : `${request.work_id}:${request.retry_attempt}:${request.lease_gen}:${endpoint}`;
 }
 
 function parseReply(path: string, reply: HttpReply): JsonObject {
