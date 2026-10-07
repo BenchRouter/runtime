@@ -137,7 +137,9 @@ export function parseRunnerWorkMode(value: JsonValue): RunnerWorkMode | null {
  * server issues work that needs a feature only to a runtime that advertised it at
  * hello. A new feature needs no customer refresh, but the server must know its name
  * before any release advertises it: an unknown advertised name is a protocol error.
- * `case_subset` is reserved (§3.3.5): stage 1 never issues it.
+ * `case_subset` (§3.3.5): the runtime runs a server-chosen batch of a replay run's
+ * cases, reports the case index with its snapshot, and uses the batch upload
+ * and fail calls. The server leases batches only to a session that advertised it.
  */
 export const RUNNER_FEATURE_CAPABILITIES = ["case_subset", "case_repeats"] as const;
 export type RunnerFeatureCapability = (typeof RUNNER_FEATURE_CAPABILITIES)[number];
@@ -202,6 +204,10 @@ export type RunnerHelloIdempotencyKey = `hello:${number}:${number}:${number}`;
  * - claim: `<session_id>:claim:<claim_seq>`. A retried claim returns the same items.
  * - upload: `<work_id>:<retry_attempt>:upload`
  * - fail: `<work_id>:<retry_attempt>:fail`
+ * - batch upload (`case_subset`): `<work_id>:<retry_attempt>:<lease_gen>:upload`
+ * - batch fail (`case_subset`): `<work_id>:<retry_attempt>:<lease_gen>:fail`
+ *
+ * A batch is one lease generation of a batched item, so its key names the generation.
  *
  * Heartbeat is not keyed: it only renews, and it never revives an expired generation.
  */
@@ -210,7 +216,9 @@ export type RunnerIdempotencyKey =
   | `${string}:ready`
   | `${string}:claim:${number}`
   | `${string}:${number}:upload`
-  | `${string}:${number}:fail`;
+  | `${string}:${number}:fail`
+  | `${string}:${number}:${number}:upload`
+  | `${string}:${number}:${number}:fail`;
 
 /** §3.3.2: the role of a model-facing call. */
 export const RUNNER_CALL_ROLES = ["model", "judge"] as const;
@@ -433,6 +441,14 @@ export interface RunnerHelloRequest {
   kit_file_hashes: Record<string, Sha256Digest>;
 }
 
+/**
+ * What this server accepts beyond the base v1 bodies. A runtime sends an optional
+ * request field only when hello listed its feature, so an older server never
+ * receives a field it would refuse. `case_index`: `RunnerRouteContract.case_index`.
+ */
+export const RUNNER_SERVER_FEATURES = ["case_index"] as const;
+export type RunnerServerFeature = (typeof RUNNER_SERVER_FEATURES)[number];
+
 export interface RunnerHelloSession {
   outcome: "session";
   session_id: string;
@@ -447,6 +463,8 @@ export interface RunnerHelloSession {
   prepare_deadline_at: RunnerTimestamp;
   /** §3.3.4 clock 4; null means snapshot admission only (§6.2 R3). */
   retire_at: RunnerTimestamp | null;
+  /** Absent from a server that predates it; a runtime treats that as none. */
+  server_features?: RunnerServerFeature[];
 }
 
 /** §3.1: `done` and `blocked` release the startup slot in the hello transaction. */
@@ -476,6 +494,28 @@ export type RunnerReleaseStatusResponse =
 // snapshot (§3.2, §3.8)
 // ---------------------------------------------------------------------------
 
+/** One case of a frozen replay route: its ID and the version the runtime derived from its content. */
+export interface RunnerCaseRef {
+  case_id: string;
+  case_version: string;
+}
+/** RUN-001: the opaque case domain, shared with the eval-call header and failure diagnostics. */
+export const RUNNER_CASE_ID_MAX = 200;
+
+/**
+ * Whether a case ID may be named in a case index and a batch: 1 to 200 characters
+ * with no control character. The runtime reports a case index only when every case
+ * of the route passes, and the server accepts only such an index, so the two agree.
+ */
+export function isRunnerBatchCaseId(value: string): boolean {
+  if (value.length === 0 || value.length > RUNNER_CASE_ID_MAX) return false;
+  for (const char of value) {
+    const code = char.codePointAt(0) ?? 0;
+    if (code < 0x20 || code === 0x7f) return false;
+  }
+  return true;
+}
+
 /** §3.2: the execution contract parts the runtime reports for one route. */
 export interface RunnerRouteContract {
   route_key: string;
@@ -490,6 +530,12 @@ export interface RunnerRouteContract {
   /** Declared evaluator env names; never values. */
   env_names: string[];
   case_count: number;
+  /**
+   * `case_subset`: the route's cases in the runtime's order, repeats expanded.
+   * Replay routes only, and only when hello listed `case_index`. Its length is
+   * `case_count`. IDs and versions only; raw cases are never sent.
+   */
+  case_index?: RunnerCaseRef[];
   /** §3.8: locally derived request-feature metadata. Raw cases are never sent. */
   request_features: {
     required_parameters: string[];
@@ -581,12 +627,17 @@ export interface RunnerBudgetScope {
 }
 
 /**
- * §3.3.5: reserved in v1. The runtime parses it; stage 1 never sends it. A subset
- * item always requires the `case_subset` feature.
+ * §3.3.5: the cases of this lease generation. A batched replay item always
+ * carries `subset` (even when the batch is the whole route) and requires the
+ * `case_subset` feature; the server never sends `all`. Null on any other item.
  */
 export type RunnerCaseSelection = { kind: "all" } | { kind: "subset"; case_ids: string[] };
 
-/** §3.3.5: reserved in v1. The evidence the subset combines with (stage 2). */
+/**
+ * §3.3.5: the evidence a subset combines with. The server sends the item's own
+ * result set, snapshot and contract digest: batches combine only inside one run.
+ * A runtime refuses a subset whose base snapshot or contract digest is not the item's.
+ */
 export interface RunnerWorkAncestry {
   base_result_set_id: string;
   base_snapshot_id: string;
@@ -731,6 +782,18 @@ export interface RunnerUploadRequest {
   payload_digest: Sha256Digest;
   case_results: JsonValue[];
   /**
+   * Batched items only (required there, refused elsewhere): the lease generation's
+   * `case_selection.case_ids`, repeated like the contract digest. `case_results`
+   * and `case_failures` together name each of them exactly once.
+   */
+  case_ids?: string[];
+  /**
+   * Batched items only: the cases of the batch with no scorable evidence, as the
+   * fixed fields of the EVAL-011 failed-case diagnostic. A batch that ran to the
+   * end is uploaded even when some cases failed; a scorer's "fail" is a result row.
+   */
+  case_failures?: JsonObject[];
+  /**
    * Executable items only: the evaluator's result receipt quality,
    * `{ primary_metric: { name, score }, metrics }`. Null for replay items, whose quality is
    * the case rows. Not part of `payload_digest`.
@@ -768,7 +831,15 @@ export interface RunnerFailRequest {
   retry_attempt: number;
   cause: RunnerWorkFailCause;
   diagnostics: JsonObject;
+  /** Batched items only (required there): the lease generation's case IDs. */
+  case_ids?: string[];
 }
+
+/**
+ * Causes that end one batch, not the run: the batch did not run to the end, its
+ * cases stay pending, and a later grant gives them out again.
+ */
+export const RUNNER_BATCH_RELEASE_CAUSES = ["retiring", "lease_lost", "deadline_exceeded"] as const satisfies readonly RunnerWorkFailCause[];
 
 /**
  * §3.3.1: the durable receipt. One D1 batch commits evidence, receipt, terminal state
@@ -781,7 +852,12 @@ export interface RunnerReceipt {
   work_id: string;
   retry_attempt: number;
   lease_gen: number;
-  terminal: "uploaded" | "failed";
+  /**
+   * `uploaded` and `failed` end the work item. A batched item also commits
+   * `accepted` (the batch is stored and the run continues) and `released` (the
+   * batch is given back and its cases stay pending).
+   */
+  terminal: "uploaded" | "failed" | "accepted" | "released";
   committed_at: RunnerTimestamp;
 }
 

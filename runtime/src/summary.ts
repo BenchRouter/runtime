@@ -18,6 +18,7 @@ export class JobSummary {
   private readonly lines: string[] = [];
   private readonly failures = new Map<string, number>();
   private uploads = 0;
+  private batches = 0;
   private infraOrHarness = false;
   private blocked = false;
   private protocolError: string | null = null;
@@ -33,6 +34,12 @@ export class JobSummary {
   uploaded(workId: string, model: string, cases: number, passes: number): void {
     this.uploads += 1;
     this.note(`uploaded ${model}: ${passes}/${cases} cases passed (work ${workId})`);
+  }
+
+  /** §3.3.5: one batch of a run was stored; the run continues with its next batch. */
+  stored(workId: string, model: string, cases: number, failed: number): void {
+    this.batches += 1;
+    this.note(`stored a batch of ${model}: ${cases} cases${failed > 0 ? `, ${failed} without a result` : ""} (work ${workId})`);
   }
 
   failed(workId: string, cause: string, failureClass: FailureClass, detail: string): void {
@@ -64,8 +71,8 @@ export class JobSummary {
 
   exitCode(): number {
     if (this.blocked || this.protocolError !== null) return 1;
-    if (this.snapshotUnavailable && this.uploads === 0) return 1;
-    if (this.uploads === 0 && this.infraOrHarness) return 1;
+    if (this.snapshotUnavailable && this.uploads + this.batches === 0) return 1;
+    if (this.uploads + this.batches === 0 && this.infraOrHarness) return 1;
     return 0;
   }
 
@@ -78,6 +85,7 @@ export class JobSummary {
       "| --- | --- |",
       `| Outcome | ${cell(this.outcome)} |`,
       `| Results uploaded | ${this.uploads} |`,
+      ...(this.batches > 0 ? [`| Batches stored | ${this.batches} |`] : []),
       `| Next wake-up | ${cell(this.nextWake ?? "none")} |`,
       ...(this.protocolError ? [`| Protocol error | ${cell(this.protocolError)} |`] : []),
       "",

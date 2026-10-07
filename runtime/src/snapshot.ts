@@ -2,7 +2,7 @@
 // to compose the fingerprint and `contract_digest`; it never composes a digest itself.
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import type { RunnerRouteContract, Sha256Digest } from "../../src/shared/runner-protocol";
+import { isRunnerBatchCaseId, type RunnerRouteContract, type Sha256Digest } from "../../src/shared/runner-protocol";
 import { loadReplayCases, planningRequirements } from "./cases";
 import { sha256Digest } from "./json";
 import { declaredFiles, type ManifestRoute } from "./manifest";
@@ -13,7 +13,12 @@ export async function hashDeclaredFiles(treeRoot: string, route: ManifestRoute):
   return hashes;
 }
 
-export async function routeContract(treeRoot: string, route: ManifestRoute): Promise<RunnerRouteContract> {
+/**
+ * `reportCaseIndex`: the server accepts a case index (hello listed `case_index`)
+ * and this runtime runs case subsets. A route with a case ID outside the batch
+ * case domain (`isRunnerBatchCaseId`) reports none, so it is leased whole.
+ */
+export async function routeContract(treeRoot: string, route: ManifestRoute, reportCaseIndex = false): Promise<RunnerRouteContract> {
   const fileHashes = await hashDeclaredFiles(treeRoot, route);
   if (route.executable) {
     const executable = route.executable;
@@ -32,7 +37,7 @@ export async function routeContract(treeRoot: string, route: ManifestRoute): Pro
     };
   }
   const cases = await loadReplayCases(treeRoot, route);
-  return {
+  const contract: RunnerRouteContract = {
     route_key: route.routeId,
     mode: route.mode,
     manifest_entry: route.entry,
@@ -44,6 +49,10 @@ export async function routeContract(treeRoot: string, route: ManifestRoute): Pro
     case_count: cases.length,
     request_features: planningRequirements(cases)
   };
+  if (reportCaseIndex && cases.length > 0 && cases.every((testCase) => isRunnerBatchCaseId(testCase.id))) {
+    contract.case_index = cases.map((testCase) => ({ case_id: testCase.id, case_version: testCase.version }));
+  }
+  return contract;
 }
 
 /** §3.2: re-hash before an item runs; any difference is `tree_mutated`. */

@@ -1,7 +1,13 @@
 // §3.3: one runtime process per job. hello → fetch the eval tree → snapshot → ready →
 // claim loop with up to 4 in-process replay slots → exit. Heartbeats every 30 s keep
 // the session and every lease alive; a lease whose local expiry passes stops starting
-// calls. Claiming stops when the remaining job time is short.
+// calls. Claiming stops when the remaining job time is short, and when the server
+// offers no work for longer than `idle_exit_s` while no lease is held.
+//
+// §3.3.5 case batches: a batched item is leased one batch of cases at a time. Each
+// batch is the next lease generation of the same work item, so a lease is known by
+// `(work_id, lease_gen)` here. A batch that ran to the end is uploaded with its
+// case IDs, its rows and its case failures; the server keeps it and grants the next.
 import {
   RUNNER_HEARTBEAT_INTERVAL_S,
   RUNNER_LEASE_TTL_S,
@@ -9,8 +15,10 @@ import {
   RUNNER_PROTOCOL_MAJOR,
   RUNNER_REPLAY_SLOTS,
   type RunnerBlockedOutcome,
+  type RunnerFailRequest,
   type RunnerHelloSession,
   type RunnerRouteContract,
+  type RunnerUploadRequest,
   type RunnerWorkFailCause,
   type RunnerWorkItem,
   type Sha256Digest
@@ -33,6 +41,21 @@ import { ReplayMetricsWriter, type MetricsTerminal } from "./metrics";
 
 /** Stop claiming when less than this remains before `retire_at` (the upload reserve is already inside retire_at). */
 const MIN_CLAIM_WINDOW_MS = 60_000;
+/**
+ * §3.4: the server ends an idle session at `idle_exit_s`. If it keeps answering
+ * `wait_until` instead, the worker exits by itself a quarter later (75 s for the
+ * 60 s ceiling), so no worker waits out a job for work it never gets.
+ */
+const IDLE_EXIT_GRACE = 1.25;
+
+/** A lease is one generation of a work item: the next batch of a batched item is a new lease. */
+function leaseKey(item: Pick<RunnerWorkItem, "work_id" | "lease_gen">): string {
+  return `${item.work_id}:${item.lease_gen}`;
+}
+
+function batchCaseIds(item: RunnerWorkItem): string[] | null {
+  return item.case_selection !== null && item.case_selection.kind === "subset" ? item.case_selection.case_ids : null;
+}
 const UNHEALTHY_BEAT_MS = 5_000;
 
 interface LeaseState {
@@ -67,12 +90,17 @@ class Heartbeat {
   add(item: RunnerWorkItem): LeaseState {
     const localExpiry = Math.min(Date.parse(item.lease_expires_at), Date.now() + RUNNER_LEASE_TTL_S * 1000) - RUNNER_LOCAL_EXPIRY_MARGIN_S * 1000;
     const lease: LeaseState = { item, localExpiry, controller: new AbortController() };
-    this.leases.set(item.work_id, lease);
+    // The server grants a new generation only after the earlier one ended, and a
+    // heartbeat names each work item once: drop the ended generations.
+    for (const [key, held] of this.leases) {
+      if (held.item.work_id === item.work_id && held.item.lease_gen < item.lease_gen) this.leases.delete(key);
+    }
+    this.leases.set(leaseKey(item), lease);
     return lease;
   }
 
-  remove(workId: string): void {
-    this.leases.delete(workId);
+  remove(item: Pick<RunnerWorkItem, "work_id" | "lease_gen">): void {
+    this.leases.delete(leaseKey(item));
   }
 
   beat(): Promise<void> {
@@ -99,8 +127,8 @@ class Heartbeat {
     this.healthy = true;
     if (response.outcome === "ok") {
       for (const status of response.leases) {
-        const lease = this.leases.get(status.work_id);
-        if (!lease || lease.item.lease_gen !== status.lease_gen) continue;
+        const lease = this.leases.get(leaseKey(status));
+        if (!lease) continue;
         if (status.status === "ok") {
           lease.localExpiry = Math.min(Date.parse(status.lease_expires_at), ackAt + RUNNER_LEASE_TTL_S * 1000) - RUNNER_LOCAL_EXPIRY_MARGIN_S * 1000;
         } else {
@@ -247,8 +275,10 @@ async function prepare(control: ControlContext, client: RunnerClient, hello: Run
   const manifest = await readManifest(tree.root);
   const routes: RunnerRouteContract[] = [];
   const byKey = new Map<string, PreparedRoute>();
+  // §3.3.5: the case index is sent only to a server that accepts it, by a runtime that runs subsets.
+  const reportCaseIndex = control.features.includes("case_subset") && (hello.server_features ?? []).includes("case_index");
   for (const route of manifest.routes) {
-    const contract = await routeContract(tree.root, route);
+    const contract = await routeContract(tree.root, route, reportCaseIndex);
     routes.push(contract);
     byKey.set(route.routeId, { route, fileHashes: contract.file_hashes });
   }
@@ -303,6 +333,10 @@ async function claimLoop(
   let claimSeq = 0;
   let claimErrors = 0;
   let stop: string | null = null;
+  // §3.4: when this worker last held or got a lease. With none held for longer than
+  // the idle limit, it exits even if the server keeps answering `wait_until`.
+  const idleLimitMs = Math.max(1, hello.idle_exit_s) * 1000 * IDLE_EXIT_GRACE;
+  let lastLeaseAt = Date.now();
   const retireTimer = setTimeout(() => {
     for (const lease of heartbeat.leases.values()) lease.controller.abort(new ItemFault("retiring", "the job reached retire_at"));
   }, Math.max(0, retireAt - Date.now()));
@@ -312,6 +346,11 @@ async function claimLoop(
     while (true) {
       if (stop === null && stopRequested()) stop = "the session ended";
       if (stop === null && Date.now() >= retireAt - MIN_CLAIM_WINDOW_MS) stop = "too little job time left to claim";
+      if (stop === null && running.size === 0 && Date.now() - lastLeaseAt >= idleLimitMs) {
+        stop = "exit: idle (no work within idle_exit_s)";
+        summary.outcome = stop;
+        summary.note("the server offered no work within idle_exit_s; this worker exits by itself");
+      }
       const free = RUNNER_REPLAY_SLOTS - running.size;
       if (stop !== null || free <= 0 || !heartbeat.healthy) {
         if (running.size === 0 && stop !== null) break;
@@ -340,15 +379,23 @@ async function claimLoop(
               if (running.size > 0 || response.items.length > 1) refusal = new ItemFault("mode_unsupported", "executable work never shares a job with other work");
               stop = "an executable item runs alone in a fresh job";
             }
-            const promise = runItem(control, client, holds, heartbeat, prepared, item, summary, refusal, metrics).finally(() => running.delete(item.work_id));
-            running.set(item.work_id, promise);
+            const key = leaseKey(item);
+            const promise = runItem(control, client, holds, heartbeat, prepared, item, summary, refusal, metrics).finally(() => {
+              running.delete(key);
+              lastLeaseAt = Date.now();
+            });
+            running.set(key, promise);
+            lastLeaseAt = Date.now();
           }
           if (response.items.length === 0) await waitForAny(1000);
           break;
-        case "wait_until":
+        case "wait_until": {
           summary.nextWake = response.until;
-          await waitForAny(Math.max(0, Date.parse(response.until) - Date.now()));
+          const untilMs = Date.parse(response.until) - Date.now();
+          // With no lease held, never wait past the idle limit.
+          await waitForAny(Math.max(0, running.size === 0 ? Math.min(untilMs, lastLeaseAt + idleLimitMs - Date.now()) : untilMs));
           break;
+        }
         case "draining":
           stop = "draining";
           break;
@@ -427,7 +474,7 @@ async function runItem(
       }
     }
   } finally {
-    heartbeat.remove(item.work_id);
+    heartbeat.remove(item);
   }
 }
 
@@ -441,6 +488,16 @@ async function executeItem(
 ): Promise<ItemOutcome> {
   const missing = item.requires.features.filter((feature) => !control.features.includes(feature));
   if (missing.length > 0) throw new ItemFault("capability_unsupported", `this runtime does not advertise ${missing.join(", ")}`);
+  if (batchCaseIds(item) !== null) {
+    // §3.3.5: a batch combines only with evidence of its own snapshot and contract,
+    // and only a replay item has cases to select.
+    if (!control.features.includes("case_subset") || item.mode !== "isolated_replay") {
+      throw new ItemFault("capability_unsupported", "this work item cannot run a case subset");
+    }
+    if (item.ancestry === null || item.ancestry.base_snapshot_id !== item.snapshot_id || item.ancestry.base_contract_digest !== item.contract_digest) {
+      throw new ItemFault("capability_unsupported", "the case subset combines with evidence of another snapshot or contract");
+    }
+  }
   const entry = prepared.get(item.contract_digest);
   if (!entry) throw new ItemFault("runtime_error", `the work item names contract ${item.contract_digest}, which this session did not admit`);
   const treeRoot = `${control.workspace}/.br-eval`;
@@ -465,10 +522,13 @@ async function executeItem(
 
 /** §3.3.1: one terminal write per item. A lost response is recovered from the receipt. */
 async function commit(control: ControlContext, client: RunnerClient, item: RunnerWorkItem, outcome: ItemOutcome, summary: JobSummary, fileHashes: Record<string, Sha256Digest>): Promise<MetricsTerminal> {
+  const batchIds = batchCaseIds(item);
   try {
     if (outcome.kind === "upload") {
       const rows: JsonObject[] = outcome.rows;
-      const committed = await client.upload({
+      const batch = outcome.batch;
+      const failures = batch?.failures ?? [];
+      const request: RunnerUploadRequest = {
         session_id: client.sessionId,
         work_id: item.work_id,
         lease_gen: item.lease_gen,
@@ -479,16 +539,39 @@ async function commit(control: ControlContext, client: RunnerClient, item: Runne
         payload_digest: sha256Digest(canonicalJson(rows)),
         case_results: rows,
         quality: outcome.quality
-      });
+      };
+      if (batch !== undefined) {
+        // §3.3.5: a batch call repeats its grant and names every case of it once.
+        request.case_ids = batch.caseIds;
+        request.case_failures = failures.map((failure): JsonObject => ({
+          case_id: failure.case_id, stage: failure.stage, error_code: failure.error_code, cause_code: failure.cause_code,
+          cause_name: failure.cause_name, model_call_id: failure.model_call_id, latency_ms: failure.latency_ms
+        }));
+      }
+      const committed = await client.upload(request);
       // §3.3.1: the server can commit the upload as a failure (its evidence could not be published).
       if (committed.receipt.terminal === "failed") {
-        summary.failed(item.work_id, "upload_error", "infra", "the server recorded the upload as a failure");
+        // §3.3.5: a batch with case failures ends its run as failed; that is data, like `case_failures` of a whole run.
+        if (failures.length > 0) {
+          summary.failed(item.work_id, "case_failures", failureClass("case_failures", failures.every((failure) => failure.stage === "model_call")), item.model_run.model);
+        } else {
+          summary.failed(item.work_id, "upload_error", "infra", "the server recorded the upload as a failure");
+        }
         return "failed";
+      }
+      if (committed.receipt.terminal === "accepted") {
+        summary.stored(item.work_id, item.model_run.model, rows.length + failures.length, failures.length);
+        return "uploaded";
       }
       summary.uploaded(item.work_id, item.model_run.model, outcome.rows.length, outcome.rows.filter((row) => row.pass).length);
       return "uploaded";
     }
-    await client.fail({ session_id: client.sessionId, work_id: item.work_id, lease_gen: item.lease_gen, retry_attempt: item.retry_attempt, cause: outcome.cause, diagnostics: outcome.diagnostics });
+    const failure: RunnerFailRequest = {
+      session_id: client.sessionId, work_id: item.work_id, lease_gen: item.lease_gen, retry_attempt: item.retry_attempt,
+      cause: outcome.cause, diagnostics: outcome.diagnostics
+    };
+    if (batchIds !== null) failure.case_ids = batchIds;
+    await client.fail(failure);
     summary.failed(item.work_id, outcome.cause, failureClass(outcome.cause, outcome.providerOnly), item.model_run.model);
     return "failed";
   } catch (error) {

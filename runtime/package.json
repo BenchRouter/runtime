@@ -1,6 +1,6 @@
 {
   "name": "@benchrouter/runtime",
-  "version": "1.0.4",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "description": "BenchRouter signed runtime for GitHub Actions eval jobs and local capture and calibrate (RUN-001).",
@@ -10,7 +10,7 @@
   },
   "benchrouter": {
     "protocol_major": 1,
-    "features": ["case_repeats"]
+    "features": ["case_repeats", "case_subset"]
   },
   "dependencies": {
     "yaml": "2.9.0"

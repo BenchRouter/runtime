@@ -104,8 +104,15 @@ interface CaseResult {
   metrics: ReplayMetrics;
 }
 
+/** §3.3.5: what a batch (a case subset) uploads beside its rows. */
+export interface BatchOutcome {
+  caseIds: string[];
+  /** Cases of the batch with no scorable evidence, as EVAL-011 failed-case diagnostics. */
+  failures: EvalFailedCaseDiagnostic[];
+}
+
 export type ItemOutcome =
-  | { kind: "upload"; rows: UploadRow[]; quality: JsonObject | null; metrics?: ReplayMetrics[] }
+  | { kind: "upload"; rows: UploadRow[]; quality: JsonObject | null; metrics?: ReplayMetrics[]; batch?: BatchOutcome }
   | { kind: "fail"; cause: RunnerWorkFailCause; diagnostics: JsonObject; providerOnly: boolean; metrics?: ReplayMetrics[] };
 
 function encodeCallHeader(header: RunnerEvalCallHeader): string {
@@ -141,13 +148,12 @@ function positiveMs(value: number): number {
 }
 
 export async function runReplayItem(env: ItemEnvironment): Promise<ItemOutcome> {
-  const { item, route, cases } = env;
+  const { item, route } = env;
   if (item.limits.trials !== 1) throw new ItemFault("capability_unsupported", "stage 1 runs one trial per item");
-  if (item.case_selection !== null && item.case_selection.kind === "subset") {
-    // §3.3.5: subset execution is deferred; this runtime never advertises case_subset.
-    throw new ItemFault("capability_unsupported", "case subsets are not supported by this runtime");
-  }
-  if (cases.length === 0) throw new ItemFault("harness_failed", `no runnable eval cases for route ${route.routeId}`);
+  if (env.cases.length === 0) throw new ItemFault("harness_failed", `no runnable eval cases for route ${route.routeId}`);
+  // §3.3.5: a batch is the server's choice of this lease generation's cases, in its order.
+  const batchIds = item.case_selection !== null && item.case_selection.kind === "subset" ? item.case_selection.case_ids : null;
+  const cases = batchIds === null ? env.cases : selectBatch(env.cases, batchIds);
   const workDeadlineAt = Date.parse(item.work_deadline_at);
   const concurrency = Math.max(1, Math.min(item.limits.case_concurrency, cases.length));
   const scorers: ScorerProcess[] = [];
@@ -181,6 +187,18 @@ export async function runReplayItem(env: ItemEnvironment): Promise<ItemOutcome> 
     }));
     if (env.signal.aborted) throw abortFault(env);
     const failed = results.map((result) => result.failure).filter((failure): failure is EvalFailedCaseDiagnostic => failure !== null);
+    if (batchIds !== null) {
+      // A batch that ran to the end is uploaded: one result row for each scored case
+      // and one diagnostic for each case with no scorable evidence. The server decides
+      // whether the run goes on.
+      return {
+        kind: "upload",
+        rows: results.filter((result) => result.failure === null).map((result) => result.row),
+        quality: null,
+        metrics: results.map((result) => result.metrics),
+        batch: { caseIds: batchIds, failures: failed }
+      };
+    }
     if (failed.length === 0) return { kind: "upload", rows: results.map((result) => result.row), quality: null, metrics: results.map(result => result.metrics) };
     return {
       kind: "fail",
@@ -198,6 +216,17 @@ export async function runReplayItem(env: ItemEnvironment): Promise<ItemOutcome> 
     env.signal.removeEventListener("abort", stopScorers);
     await Promise.all(scorers.map((scorer) => scorer.stop()));
   }
+}
+
+/** The batch's cases from the eval tree. A case the tree does not have is not this tree's batch. */
+function selectBatch(cases: ReplayCase[], caseIds: string[]): ReplayCase[] {
+  const byId = new Map(cases.map((testCase) => [testCase.id, testCase]));
+  if (caseIds.length === 0 || new Set(caseIds).size !== caseIds.length) throw new ItemFault("harness_failed", "the batch names no case, or one case twice");
+  return caseIds.map((caseId) => {
+    const testCase = byId.get(caseId);
+    if (testCase === undefined) throw new ItemFault("harness_failed", `the batch names case ${JSON.stringify(caseId.slice(0, 80))}, which the eval tree does not have`);
+    return testCase;
+  });
 }
 
 async function runCase(env: ItemEnvironment, scorer: ScorerProcess, testCase: ReplayCase, trial: number, workDeadlineAt: number): Promise<CaseResult> {
