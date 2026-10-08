@@ -1,11 +1,11 @@
-// EVAL-002 / SERVE-008 / SERVE-009: reading a replayed model response. Ported from the
-// old kit replay harness without behavior change: the structural outcome codes, the
-// JSON-schema check that never reports a violation it cannot prove, and the
-// per-protocol extraction of text, tool calls, refusal and finish reason.
+// EVAL-002 / SERVE-008 / SERVE-009: reading a replayed model response: the per-protocol
+// extraction of text, tool calls, refusal and finish reason, and the two outcome codes
+// that state a protocol fact (the output limit ended the answer; the answer has no
+// content). The runner forms no opinion of what a model answered: the customer's scorer
+// is the only judge. EVAL-011: the JSON-schema check below is for a judge reply only.
 import { isJsonFiniteNumber, isJsonObject, isJsonString, stringOrEmpty, type JsonObject, type JsonValue } from "./json";
 
 export const OUTCOME = {
-  responseFormatUnhonored: "response_format_unhonored",
   outputEmpty: "output_empty",
   outputCutOff: "output_cut_off"
 } as const;
@@ -166,23 +166,7 @@ export function jsonResponseFormat(value: JsonValue | undefined): JsonFormat | n
   return type === "json_object" ? { kind: "json_object" } : null;
 }
 
-function flatJsonFormat(value: JsonValue | undefined): JsonFormat | null {
-  const format = objectAt(value);
-  if (!format) return null;
-  const type = stringOrEmpty(format.type).toLowerCase();
-  if (type === "json_schema") return format.schema !== undefined ? { kind: "json_schema", schema: format.schema } : { kind: "json" };
-  return type === "json_object" ? { kind: "json_object" } : null;
-}
-
-function requestedJsonFormat(input: JsonObject): JsonFormat | null {
-  if (input.response_format !== undefined) return jsonResponseFormat(input.response_format);
-  const responsesText = objectAt(input.text);
-  if (responsesText) return flatJsonFormat(responsesText.format);
-  const outputConfig = objectAt(input.output_config);
-  return outputConfig ? flatJsonFormat(outputConfig.format) : null;
-}
-
-/** EVAL-002: why `text` does not satisfy a JSON format, or null when it does or cannot be proven. */
+/** EVAL-011: why a judge reply does not satisfy the format its scorer asked for, or null when it does or cannot be proven. */
 export function jsonFormatViolation(format: JsonFormat | null, text: string): string | null {
   if (!format) return null;
   let value: JsonValue;
@@ -199,19 +183,20 @@ export function jsonFormatViolation(format: JsonFormat | null, text: string): st
   return null;
 }
 
-/** EVAL-002: the structural reason a failed case's output could not satisfy its own request. */
-export function structuralOutcome(input: JsonObject, parsed: JsonObject, finishReason: string | null): { code: string; message: string } | null {
+/**
+ * EVAL-002: the protocol fact that explains a failed case, or null. It never reads the
+ * request or what the answer says, so it cannot disagree with the scorer.
+ */
+export function structuralOutcome(parsed: JsonObject, finishReason: string | null): { code: string; message: string } | null {
   if (finishReason === "length") return { code: OUTCOME.outputCutOff, message: `${OUTCOME.outputCutOff}: the model reached its output limit (finish_reason=length)` };
   const answer = responseAnswer(parsed);
-  if (answer.hasRefusal) return null;
-  const output = answer.text.trim();
-  if (output.length === 0) return answer.hasToolCalls ? null : { code: OUTCOME.outputEmpty, message: `${OUTCOME.outputEmpty}: the model returned no content` };
-  const violation = jsonFormatViolation(requestedJsonFormat(input), output);
-  return violation ? { code: OUTCOME.responseFormatUnhonored, message: `${OUTCOME.responseFormatUnhonored}: output ${violation}` } : null;
+  if (answer.hasRefusal || answer.hasToolCalls || answer.text.trim().length > 0) return null;
+  return { code: OUTCOME.outputEmpty, message: `${OUTCOME.outputEmpty}: the model returned no content` };
 }
 
 // ---------------------------------------------------------------------------
-// A dependency-free JSON Schema check (2020-12 dialect, assertion subset)
+// EVAL-011: a dependency-free JSON Schema check (2020-12 dialect, assertion subset)
+// for a judge reply. It never reports a violation it cannot prove.
 // ---------------------------------------------------------------------------
 
 const ANNOTATIONS = new Set(["$schema", "$comment", "$anchor", "$defs", "definitions", "title", "description", "default", "examples", "format", "deprecated", "readOnly", "writeOnly", "contentEncoding", "contentMediaType", "strict"]);

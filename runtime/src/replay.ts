@@ -316,8 +316,9 @@ async function runCase(env: ItemEnvironment, scorer: ScorerProcess, testCase: Re
       throw judgeFailure;
     }
     if (!row.pass) {
-      // EVAL-002: explain the failure from the output's structure; the scorer's reasons are never read.
-      const structural = structuralOutcome(testCase.body, parsedValue, completionFinishReason(parsedValue));
+      // EVAL-002: name the protocol fact, if any, behind the failure. Neither the scorer's
+      // reasons nor what the answer says is read.
+      const structural = structuralOutcome(parsedValue, completionFinishReason(parsedValue));
       if (structural) {
         row.error = structural.message;
         row.outcome_code = structural.code;
