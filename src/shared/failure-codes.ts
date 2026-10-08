@@ -6,6 +6,7 @@ import {
   type JsonValue
 } from "./json-parse-contracts";
 import { isRecord } from "./parsing";
+import { parseStoredRejectionReason, storedRejectionReason, type RejectionReason } from "./rejection-reason";
 
 export const EVAL_CASE_FAILURE_STAGES = ["model_call", "judge", "scorer", "harness"] as const;
 export type EvalCaseFailureStage = (typeof EVAL_CASE_FAILURE_STAGES)[number];
@@ -50,10 +51,18 @@ export const JUDGE_OUTPUT_TRUNCATED = "judge_output_truncated";
 /** EVAL-013: a call of an extra trial whose worst-case cost has no bound; it cannot be held. */
 export const EXTRA_CALL_UNBOUNDED = "extra_call_unbounded";
 
-// EVAL-002: why a failed case's output could not satisfy its own request, read from
-// the output's structure. The scorer alone decides pass or fail.
-export const EVAL_CASE_OUTCOME_CODES = ["response_format_unhonored", "output_empty", "output_cut_off"] as const;
+// EVAL-002: the protocol fact behind a failed case: the answer had no content, or the
+// output limit ended it. Neither reads what the answer says. The scorer alone decides
+// pass or fail, and BenchRouter forms no opinion of an answer's content.
+export const EVAL_CASE_OUTCOME_CODES = ["output_empty", "output_cut_off"] as const;
 export type EvalCaseOutcomeCode = (typeof EVAL_CASE_OUTCOME_CODES)[number];
+
+/**
+ * Overlap, to delete once runtime 1.1.1 is promoted: runtime 1.1.0 still labels a failed
+ * case with this code from the shape of its output. An upload that carries it is
+ * accepted and stored without the label.
+ */
+export const RETIRED_FORMAT_OUTCOME_CODE = "response_format_unhonored";
 
 export const EVAL_RUN_FAILURE_REASON_CODES = [
   "case_failures",
@@ -67,7 +76,8 @@ export const EVAL_RUN_FAILURE_REASON_CODES = [
   "orphaned_before_dispatch",
   // EVAL-011: the repository cannot run a server-dispatched eval (see `REPOSITORY_BLOCK_CODES`).
   "repository_blocked",
-  // RUN-001 §3.3.4: the run needs more time than one job gives, so no worker can run it.
+  // RUN-001 §3.3.4: the route has more cases than one evaluation run supports, so no
+  // worker can run it. The code keeps its first name, from when the limit was one job's time.
   "work_exceeds_job_window"
 ] as const;
 export type EvalRunFailureReasonCode = (typeof EVAL_RUN_FAILURE_REASON_CODES)[number];
@@ -132,6 +142,20 @@ export interface EvalFailedCaseDiagnostic {
   cause_name: string | null;
   model_call_id: string | null;
   latency_ms: number | null;
+  /**
+   * SERVE-004 / DATA-001: why the upstream rejected this case's model request.
+   * The server adds it from its own call rows (`withRejectionReasons`); an
+   * upload cannot set it. It never changes how a failure is classified.
+   */
+  rejection?: RejectionReason;
+}
+
+/** EVAL-011: the cause code of a case whose model request the upstream rejected. */
+export const REQUEST_REJECTED_CAUSE = "upstream_request_rejected";
+
+/** True when the upstream rejected the model request of this failed case. */
+export function isRejectedRequestCase(row: EvalFailedCaseDiagnostic): boolean {
+  return row.stage === "model_call" && row.cause_code === REQUEST_REJECTED_CAUSE;
 }
 
 // DATA-001: a scorer runs customer code over the model output, so its exception
@@ -150,7 +174,6 @@ const BUILT_IN_ERROR_CLASSES: ReadonlySet<string> = new Set([
 // DATA-001: the only case-error text BenchRouter stores. It is chosen by the
 // structural outcome code, never copied from an upload.
 export const EVAL_CASE_OUTCOME_ERROR = {
-  response_format_unhonored: "response_format_unhonored: the output does not satisfy the requested format",
   output_empty: "output_empty: the model returned no content",
   output_cut_off: "output_cut_off: the model reached its output limit (finish_reason=length)"
 } as const satisfies Record<EvalCaseOutcomeCode, string>;
@@ -300,6 +323,44 @@ export function withFailureVerification(
   };
 }
 
+/** The rejection columns of one server call row of a model run. */
+export interface EvalCallRejectionRow {
+  traffic_mode: string | null;
+  settlement_state: string | null;
+  rejection_kind: string | null;
+  rejection_param: string | null;
+}
+
+/**
+ * SERVE-004 / DATA-001: add the stored rejection reason to each failed case
+ * whose model request the upstream rejected. A failed case does not name its
+ * call, so the reason is added only when every rejected model call of the run
+ * has the same reason. A run with two different reasons keeps none. A model
+ * call that is still pending can settle with another reason after this read,
+ * so a run with a pending model call keeps none either. This adds a label
+ * only: no case is added, removed, or classified differently.
+ */
+export function withRejectionReasons(
+  diagnostic: EvalRunFailureDiagnostic,
+  serverCalls: readonly EvalCallRejectionRow[]
+): EvalRunFailureDiagnostic {
+  const cases = diagnostic.cases;
+  if (!cases || !cases.failed.some(isRejectedRequestCase)) return diagnostic;
+  const reasons = new Map<string, RejectionReason>();
+  for (const call of serverCalls) {
+    if (call.traffic_mode !== "eval_model") continue;
+    if (call.settlement_state === null || call.settlement_state === "pending") return diagnostic;
+    const reason = storedRejectionReason(call.rejection_kind, call.rejection_param);
+    if (reason) reasons.set(`${reason.kind} ${reason.param ?? ""}`, reason);
+  }
+  const [reason] = [...reasons.values()];
+  if (reasons.size !== 1 || !reason) return diagnostic;
+  return {
+    ...diagnostic,
+    cases: { ...cases, failed: cases.failed.map((row) => (isRejectedRequestCase(row) ? { ...row, rejection: reason } : row)) }
+  };
+}
+
 export function hasStructuredFailureCases(diagnostic: EvalRunFailureDiagnostic | null): boolean {
   return Boolean(diagnostic?.cases && (diagnostic.cases.succeeded.length > 0 || diagnostic.cases.failed.length > 0));
 }
@@ -320,7 +381,7 @@ function parseDiagnostic<Value>(value: Value, stored: boolean): ParseFailureDiag
   if (!failedStep.ok) return invalid("Failure diagnostic failed_step is invalid");
   const conclusion = nullableText(value.github_conclusion, MAX_SMALL, true);
   if (!conclusion.ok) return invalid("Failure diagnostic github_conclusion is invalid");
-  const cases = parseCases(value.cases);
+  const cases = parseCases(value.cases, stored);
   if (!cases.ok) return cases;
   const execution = parseExecution(value.execution);
   if (!execution.ok) return execution;
@@ -398,7 +459,10 @@ function parseExecution<Value>(
   };
 }
 
-function parseCases<Value>(value: Value): { ok: true; value: EvalFailureCasesDiagnostic | null } | FailureDiagnosticInvalid {
+function parseCases<Value>(
+  value: Value,
+  stored: boolean
+): { ok: true; value: EvalFailureCasesDiagnostic | null } | FailureDiagnosticInvalid {
   if (value === null) return { ok: true, value: null };
   if (!isRecord(value)) return invalid("Failure diagnostic cases must be an object or null");
   const unknown = unknownKey(value, new Set(["planned", "succeeded", "failed"]));
@@ -433,7 +497,7 @@ function parseCases<Value>(value: Value): { ok: true; value: EvalFailureCasesDia
     succeeded.push(parsed.value);
   }
   for (const item of value.failed) {
-    const parsed = parseFailed(item);
+    const parsed = parseFailed(item, stored);
     if (!parsed.ok) return parsed;
     if (caseIds.has(parsed.value.case_id)) return invalid("Failure diagnostic case ids must be unique");
     caseIds.add(parsed.value.case_id);
@@ -471,9 +535,16 @@ function parseSucceeded<Value>(value: Value): { ok: true; value: EvalSucceededCa
   return { ok: true, value: { case_id: caseId, model_call_ids: modelCallIds } };
 }
 
-function parseFailed<Value>(value: Value): { ok: true; value: EvalFailedCaseDiagnostic } | FailureDiagnosticInvalid {
+function parseFailed<Value>(
+  value: Value,
+  stored: boolean
+): { ok: true; value: EvalFailedCaseDiagnostic } | FailureDiagnosticInvalid {
   if (!isRecord(value)) return invalid("Failure diagnostic failed case must be an object");
-  const unknown = unknownKey(value, new Set(["case_id", "stage", "error_code", "cause_code", "cause_name", "message", "model_call_id", "latency_ms"]));
+  const unknown = unknownKey(value, new Set([
+    "case_id", "stage", "error_code", "cause_code", "cause_name", "message", "model_call_id", "latency_ms",
+    // Server-written only: an upload that carries it is refused as an unknown key.
+    ...(stored ? ["rejection"] : [])
+  ]));
   if (unknown) return invalid(`Failure diagnostic failed case ${unknown} is not allowed`);
   // EVAL-011 / RUN-001: case IDs are opaque bounded identities, not error codes.
   // The native repeat loader adds #repeat-2/3 to the authored identity.
@@ -498,20 +569,22 @@ function parseFailed<Value>(value: Value): { ok: true; value: EvalFailedCaseDiag
   ) {
     return invalid("Failure diagnostic latency_ms is invalid");
   }
-  return {
-    ok: true,
-    value: {
-      case_id: caseId,
-      stage,
-      error_code: errorCode,
-      cause_code: scorerStage ? null : causeCode.value,
-      cause_name: scorerStage && (causeName.value === null || !BUILT_IN_ERROR_CLASSES.has(causeName.value))
-        ? null
-        : causeName.value,
-      model_call_id: modelCallId,
-      latency_ms: latencyMs
-    }
+  const failed: EvalFailedCaseDiagnostic = {
+    case_id: caseId,
+    stage,
+    error_code: errorCode,
+    cause_code: scorerStage ? null : causeCode.value,
+    cause_name: scorerStage && (causeName.value === null || !BUILT_IN_ERROR_CLASSES.has(causeName.value))
+      ? null
+      : causeName.value,
+    model_call_id: modelCallId,
+    latency_ms: latencyMs
   };
+  // A stored reason outside the vocabulary is dropped. It never makes the
+  // diagnostic unreadable, so it cannot change a retry classification.
+  const rejection = stored ? parseStoredRejectionReason(value.rejection) : null;
+  if (rejection) failed.rejection = rejection;
+  return { ok: true, value: failed };
 }
 
 function parseVerification<Value>(value: Value): { ok: true; value: EvalFailureVerification | null } | FailureDiagnosticInvalid {
