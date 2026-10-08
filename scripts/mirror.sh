@@ -24,7 +24,9 @@ if [ -f runtime/MIRROR.txt ]; then
     git rm -q --ignore-unmatch -- "$path"
   done < runtime/MIRROR.txt
 fi
-rsync -a --delete --exclude node_modules --exclude dist "$SRC/runtime/" runtime/
+# --checksum: compare file contents. The default check compares size and time only,
+# and it skipped package-lock.json once during the 1.1.0 mirror.
+rsync -a --checksum --delete --exclude node_modules --exclude dist "$SRC/runtime/" runtime/
 if [ -f runtime/MIRROR.txt ]; then
   while IFS= read -r path; do
     case "$path" in ''|'#'*) continue ;; esac
