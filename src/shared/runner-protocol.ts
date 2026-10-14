@@ -141,8 +141,23 @@ export function parseRunnerWorkMode(value: JsonValue): RunnerWorkMode | null {
  * cases, reports the case index with its snapshot, and uses the batch upload
  * and fail calls. The server leases batches only to a session that advertised it.
  */
-export const RUNNER_FEATURE_CAPABILITIES = ["case_subset", "case_repeats"] as const;
+/**
+ * EVAL-002 (§2.3 G11): the runtime replay semantics revisions. A release declares
+ * at most one, `replay_semantics_<n>`; `n` is bumped by hand when the runtime's
+ * replay request body (`buildReplayBody`) or the scorer host's semantics change.
+ * A case result is carried only between runs of the same revision. A runtime
+ * that declares none produces runs that are never carry sources or targets.
+ */
+export const RUNNER_REPLAY_SEMANTICS_FEATURES = ["replay_semantics_1"] as const;
+export type RunnerReplaySemanticsFeature = (typeof RUNNER_REPLAY_SEMANTICS_FEATURES)[number];
+
+export const RUNNER_FEATURE_CAPABILITIES = ["case_subset", "case_repeats", ...RUNNER_REPLAY_SEMANTICS_FEATURES] as const;
 export type RunnerFeatureCapability = (typeof RUNNER_FEATURE_CAPABILITIES)[number];
+
+/** EVAL-002: the one replay semantics revision a parsed feature list declares, or null. */
+export function replaySemanticsRevision(features: readonly RunnerFeatureCapability[]): RunnerReplaySemanticsFeature | null {
+  return RUNNER_REPLAY_SEMANTICS_FEATURES.find((revision) => features.includes(revision)) ?? null;
+}
 
 /**
  * §2.2 authority capabilities. Their source is customer-committed files: the
@@ -153,9 +168,10 @@ export type RunnerFeatureCapability = (typeof RUNNER_FEATURE_CAPABILITIES)[numbe
 export const RUNNER_AUTHORITY_CAPABILITIES = ["executable", "evaluator_secrets", "install_grant"] as const;
 export type RunnerAuthorityCapability = (typeof RUNNER_AUTHORITY_CAPABILITIES)[number];
 
+/** A refused list names the refused entries in `unknown`: unknown names, or conflicting ones. */
 export type RunnerCapabilityListParse<Name extends string> =
   | { ok: true; value: Name[] }
-  | { ok: false; code: "invalid_capability_list" | "capability_unsupported"; unknown: string[] };
+  | { ok: false; code: "invalid_capability_list" | "capability_unsupported" | "capability_ambiguous"; unknown: string[] };
 
 function parseCapabilityList<Name extends string>(
   value: JsonValue,
@@ -172,9 +188,15 @@ function parseCapabilityList<Name extends string>(
   return unknown.length > 0 ? { ok: false, code: "capability_unsupported", unknown } : { ok: true, value: parsed };
 }
 
-/** Fail closed: any unknown or non-string entry refuses the whole list. */
+/**
+ * Fail closed: any unknown or non-string entry refuses the whole list. EVAL-002:
+ * so does more than one replay semantics revision, which would be ambiguous.
+ */
 export function parseRunnerFeatureCapabilities(value: JsonValue): RunnerCapabilityListParse<RunnerFeatureCapability> {
-  return parseCapabilityList(value, RUNNER_FEATURE_CAPABILITIES);
+  const parsed = parseCapabilityList(value, RUNNER_FEATURE_CAPABILITIES);
+  if (!parsed.ok) return parsed;
+  const revisions = parsed.value.filter((feature) => RUNNER_REPLAY_SEMANTICS_FEATURES.some((revision) => revision === feature));
+  return revisions.length > 1 ? { ok: false, code: "capability_ambiguous", unknown: revisions } : parsed;
 }
 
 /** Fail closed: any unknown or non-string entry refuses the whole list. */

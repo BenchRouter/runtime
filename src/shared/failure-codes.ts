@@ -57,13 +57,6 @@ export const EXTRA_CALL_UNBOUNDED = "extra_call_unbounded";
 export const EVAL_CASE_OUTCOME_CODES = ["output_empty", "output_cut_off"] as const;
 export type EvalCaseOutcomeCode = (typeof EVAL_CASE_OUTCOME_CODES)[number];
 
-/**
- * Overlap, to delete once runtime 1.1.1 is promoted: runtime 1.1.0 still labels a failed
- * case with this code from the shape of its output. An upload that carries it is
- * accepted and stored without the label.
- */
-export const RETIRED_FORMAT_OUTCOME_CODE = "response_format_unhonored";
-
 export const EVAL_RUN_FAILURE_REASON_CODES = [
   "case_failures",
   "upload_rejected",
