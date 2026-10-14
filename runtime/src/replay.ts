@@ -405,7 +405,12 @@ function usageCost(parsed: JsonObject): number | null {
   return finiteOrNull(usage.cost ?? usage.total_cost);
 }
 
-/** The declared request replayed verbatim, forced to the route id, never streamed (SERVE-009). */
+/**
+ * The declared request replayed verbatim, forced to the route id, never streamed (SERVE-009).
+ * EVAL-002: a change to this body, or to the scorer host's semantics, bumps the
+ * release's `replay_semantics_<n>` feature (runtime/package.json and
+ * RUNNER_REPLAY_SEMANTICS_FEATURES), so no case result carries across it.
+ */
 function buildReplayBody(testCase: ReplayCase, routeId: string): JsonObject {
   const body: JsonObject = { ...testCase.body, model: routeId };
   delete body.stream;

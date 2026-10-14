@@ -5,6 +5,8 @@
 // deadline, which kills this process group. Local `calibrate` loads the scorer with
 // `local: true`: the scorer console is live (sent to the parent over IPC) and error
 // messages cross back. CI replay keeps the console a no-op and sends no message text.
+// EVAL-002: a change to how this host loads or runs a scorer bumps the release's
+// `replay_semantics_<n>` feature, so no case result carries across it.
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 import { SANDBOX_CJS_SHIM_SOURCE, SANDBOX_LOCAL_CONSOLE_SOURCE, SANDBOX_MEMBRANE_SOURCE } from "../../src/setup-packet/scorer-sandbox-source";
