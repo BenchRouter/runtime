@@ -178,6 +178,36 @@ export function isExecutableLockfile(runtime: "node" | "bun", lockfile: string):
   return names.includes(lockfile);
 }
 
+/** EVAL-012: the file name of a declared lockfile (its last path segment). */
+export function executableLockfileName(lockfile: string): string {
+  return lockfile.slice(lockfile.lastIndexOf("/") + 1);
+}
+
+export type ExecutableLockfileLocation =
+  | { ok: true; name: string; path: string; directory: string | null }
+  | { ok: false; message: string };
+
+/**
+ * EVAL-012: where a route's declared lockfile is. `lockfile` is relative to working_directory
+ * (the repository root when there is none): the lockfile name, optionally after `../` segments
+ * that name an ancestor of working_directory inside the repository, such as a workspace root.
+ * The dependency install runs in the directory that holds the lockfile. `message` follows the
+ * field label.
+ */
+export function locateExecutableLockfile(runtime: "node" | "bun", workingDirectory: string | null, lockfile: string): ExecutableLockfileLocation {
+  const parts = lockfile.split("/");
+  const name = parts[parts.length - 1] ?? "";
+  const up = parts.slice(0, -1);
+  if (up.some((part) => part !== "..")) {
+    return { ok: false, message: "must name the lockfile in working_directory or in a directory above it, for example ../../pnpm-lock.yaml" };
+  }
+  if (!isExecutableLockfile(runtime, name)) return { ok: false, message: executableLockfileRule(runtime) };
+  const base = workingDirectory === null ? [] : workingDirectory.split("/");
+  if (up.length > base.length) return { ok: false, message: "must not point above the repository root" };
+  const directory = base.slice(0, base.length - up.length);
+  return { ok: true, name, path: [...directory, name].join("/"), directory: directory.length === 0 ? null : directory.join("/") };
+}
+
 /** EVAL-002: the one replay semantics revision a parsed feature list declares, or null. */
 export function replaySemanticsRevision(features: readonly RunnerFeatureCapability[]): RunnerReplaySemanticsFeature | null {
   return RUNNER_REPLAY_SEMANTICS_FEATURES.find((revision) => features.includes(revision)) ?? null;

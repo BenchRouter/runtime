@@ -57,6 +57,38 @@ export const EXTRA_CALL_UNBOUNDED = "extra_call_unbounded";
 export const EVAL_CASE_OUTCOME_CODES = ["output_empty", "output_cut_off"] as const;
 export type EvalCaseOutcomeCode = (typeof EVAL_CASE_OUTCOME_CODES)[number];
 
+/**
+ * EVAL-011: why a repository cannot run a server-dispatched eval. Each cause
+ * fails every model the same way, so a retry or a new candidate only spends
+ * GitHub Actions minutes:
+ * - `untrusted_repository_eval_context`: the dispatched workflow runs at a
+ *   commit other than the result set's frozen eval ref (AUTH-007), so the
+ *   historical refusal remains visible until a canonical production import.
+ * - `workflow_missing`: GitHub answered the workflow dispatch with 404.
+ * - `installation_revoked`: GitHub answered the dispatch with 401 or 403, or
+ *   the repository has no active GitHub App installation.
+ */
+export const REPOSITORY_BLOCK_CODES = [
+  "untrusted_repository_eval_context",
+  "workflow_missing",
+  "installation_revoked",
+  // EVAL-015: the route harness breaker (src/evals/route-harness-breaker.ts).
+  "harness_failing"
+] as const;
+export type RepositoryBlockCode = (typeof REPOSITORY_BLOCK_CODES)[number];
+
+/** EVAL-015: why a PR's eval workflow never ran (`src/evals/skipped-run-detector.ts`). */
+export const SKIPPED_RUN_CAUSES = [
+  "skip_ci",
+  "fork",
+  "diff_limit",
+  "workflow_missing",
+  "workflow_disabled",
+  "workflow_invalid",
+  "not_started"
+] as const;
+export type SkippedRunCause = (typeof SKIPPED_RUN_CAUSES)[number];
+
 export const EVAL_RUN_FAILURE_REASON_CODES = [
   "case_failures",
   "upload_rejected",

@@ -9,10 +9,8 @@
 // Every child is killed (SIGTERM, then SIGKILL after 5 s) at its deadline.
 import type { ChildProcess } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
-import { homedir } from "node:os";
-import { access, readFile, realpath, rm, stat } from "node:fs/promises";
+import { access, readFile, realpath, rm } from "node:fs/promises";
 import path from "node:path";
-import { parse as parseYaml } from "yaml";
 import type { EvalExecutionFailureReason } from "../../src/shared/failure-codes";
 import { RUNNER_PNPM_LOCKFILE, type RunnerWorkItem, type Sha256Digest } from "../../src/shared/runner-protocol";
 import { childEnv, type ControlContext } from "./control";
@@ -104,109 +102,21 @@ function executionDiagnostic(outcome: ProcessOutcome): JsonObject {
 }
 
 /**
- * The frozen install for the route's lockfile. Lifecycle scripts stay disabled for every
- * install (AUTH-007). pnpm (`pnpm_install`) is the job's own pnpm, resolved from the PATH
- * the install child gets; the runtime never fetches one. Its flags keep the npm ci posture:
- * - `--ignore-pnpmfile`: a `.pnpmfile.cjs` is repository code that pnpm runs during install,
- *   which `--ignore-scripts` does not stop;
- * - `--config.manage-package-manager-versions=false`: pnpm never downloads and switches to
- *   the `packageManager` version, so the PATH pnpm is the one that runs;
- * - the declared lockfile is the only one read: `--lockfile-dir` pins it to the working
- *   directory and the `--config` lockfile settings overrule a repository `.npmrc` or
- *   `pnpm-workspace.yaml` that would move it, turn it off, or read a branch lockfile;
- * - `--config.userconfig`: the user config is the job's `~/.npmrc`, never a repository file
- *   that a repository `.npmrc` names (user config can run a token helper);
- * - `--ignore-workspace` unless `pnpm-workspace.yaml` sits in the working directory: pnpm
- *   never walks up to a workspace above it.
+ * The frozen install for the route's lockfile, run in `installDir`, the directory that holds it
+ * (EVAL-012), with the same posture as `npm ci --ignore-scripts`: the lockfile is never rewritten
+ * and lifecycle scripts stay disabled (AUTH-007). Everything else is the package manager's own
+ * behavior for the repository. pnpm (`pnpm_install`) is whatever `pnpm` the job put on PATH,
+ * including Corepack's shim; the runtime never fetches one. pnpm finds its workspace as it does
+ * for the customer, so a package lockfile in a `sharedWorkspaceLockfile: false` workspace keeps
+ * the workspace settings its lockfile records.
  */
-async function installArgv(executable: ExecutableSpec, workDir: string, searchPath: string, home: string): Promise<string[]> {
+async function installArgv(executable: ExecutableSpec, searchPath: string): Promise<string[]> {
   if (executable.runtime === "bun") return ["bun", "install", "--frozen-lockfile", "--ignore-scripts"];
   if (path.posix.basename(executable.lockfile) !== RUNNER_PNPM_LOCKFILE) return ["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"];
-  const pnpm = await resolveOnPath("pnpm", searchPath);
-  if (pnpm === null) {
-    throw new ItemFault("harness_failed", "the route's lockfile is pnpm-lock.yaml, but pnpm is not on PATH; set pnpm up in the workflow's customer-setup block (for example with pnpm/action-setup)");
+  if ((await resolveOnPath("pnpm", searchPath)) === null) {
+    throw new ItemFault("harness_failed", "the route's lockfile is pnpm-lock.yaml, but pnpm is not on PATH; set pnpm up in the workflow's customer-setup block (for example with pnpm/action-setup or corepack enable)");
   }
-  // Corepack's shim runs the package manager the repository's packageManager field names,
-  // which can be a URL to any script: repository-chosen code with the registry grant.
-  if ((await nearestPackageName(pnpm)) === "corepack") {
-    throw new ItemFault("harness_failed", "pnpm on PATH is the Corepack shim, which runs whatever package manager the repository names; install pnpm itself in the workflow's customer-setup block (for example with pnpm/action-setup)");
-  }
-  const workspaceRoot = await isFile(path.join(workDir, "pnpm-workspace.yaml"));
-  if (workspaceRoot) await checkPnpmWorkspaceSettings(path.join(workDir, "pnpm-workspace.yaml"));
-  return [
-    pnpm, "install", "--frozen-lockfile", "--ignore-scripts", "--ignore-pnpmfile", "--config.manage-package-manager-versions=false",
-    // pnpm compares the lockfile directory with the real path of its working directory.
-    `--lockfile-dir=${await realpath(workDir)}`, "--config.lockfile=true", "--config.shared-workspace-lockfile=true",
-    "--config.git-branch-lockfile=false", "--config.merge-git-branch-lockfiles=false",
-    `--config.userconfig=${path.join(home, ".npmrc")}`,
-    ...(workspaceRoot ? [] : ["--ignore-workspace"])
-  ];
-}
-
-/**
- * The `pnpm-workspace.yaml` settings a frozen executable install accepts. pnpm applies this file's
- * settings after its command line, so a key outside this list could run repository code during
- * install (`userConfig` token helpers, `configDependencies`) or replace the declared lockfile
- * (`useLockfile`, `lockfileDir`). These keys only list packages, pin versions the lockfile must
- * match, or shape node_modules.
- */
-const PNPM_WORKSPACE_SETTINGS: readonly string[] = [
-  "packages", "catalog", "catalogs", "overrides", "packageExtensions", "peerDependencyRules",
-  "allowedDeprecatedVersions", "patchedDependencies", "allowNonAppliedPatches", "onlyBuiltDependencies",
-  "ignoredBuiltDependencies", "neverBuiltDependencies", "ignoredOptionalDependencies", "supportedArchitectures",
-  "nodeLinker", "shamefullyHoist", "hoist", "hoistPattern", "publicHoistPattern", "hoistWorkspacePackages",
-  "linkWorkspacePackages", "injectWorkspacePackages", "preferWorkspacePackages", "autoInstallPeers",
-  "dedupePeerDependents", "excludeLinksFromLockfile", "strictPeerDependencies", "resolvePeersFromWorkspaceRoot",
-  "minimumReleaseAge", "minimumReleaseAgeExclude", "auditConfig", "updateConfig", "savePrefix", "saveExact"
-];
-
-async function checkPnpmWorkspaceSettings(filePath: string): Promise<void> {
-  let parsed: JsonValue;
-  try {
-    // SAFETY: the yaml parser returns plain JSON-compatible data for this file (no custom tags), as for the manifest.
-    parsed = parseYaml(await readFile(filePath, "utf8")) as JsonValue;
-  } catch {
-    throw new ItemFault("harness_failed", "pnpm-workspace.yaml in the working directory is not valid YAML");
-  }
-  // An empty file parses to null: no settings.
-  if (parsed === null) return;
-  if (!isJsonObject(parsed)) throw new ItemFault("harness_failed", "pnpm-workspace.yaml in the working directory must be a mapping");
-  const refused = Object.keys(parsed).filter((key) => !PNPM_WORKSPACE_SETTINGS.includes(key));
-  if (refused.length > 0) {
-    throw new ItemFault("harness_failed", `pnpm-workspace.yaml sets ${refused.join(", ")}, which the executable install refuses because such settings can run repository code or replace the declared lockfile; keep only package, version, dependency-rule and node_modules layout settings there`);
-  }
-}
-
-/** The `name` of the nearest package.json above a file, or null when there is none. */
-async function nearestPackageName(filePath: string): Promise<string | null> {
-  let dir = path.dirname(filePath);
-  for (;;) {
-    let text: string | null = null;
-    try {
-      text = await readFile(path.join(dir, "package.json"), "utf8");
-    } catch {
-      // No package.json here.
-    }
-    if (text !== null) {
-      try {
-        const parsed = parseJsonText(text, "package.json");
-        return isJsonObject(parsed) && isJsonString(parsed.name) ? parsed.name : null;
-      } catch {
-        return null;
-      }
-    }
-    const parent = path.dirname(dir);
-    if (parent === dir) return null;
-    dir = parent;
-  }
-}
-
-async function isFile(filePath: string): Promise<boolean> {
-  try {
-    return (await stat(filePath)).isFile();
-  } catch {
-    return false;
-  }
+  return ["pnpm", "install", "--frozen-lockfile", "--ignore-scripts"];
 }
 
 function abortFault(signal: AbortSignal): ItemFault {
@@ -249,7 +159,9 @@ export async function runExecutableItem(env: ExecutableEnvironment): Promise<Ite
   if (control.installNpmToken !== null) {
     for (const name of INSTALL_TOKEN_ENV_NAMES) installEnv[name] = control.installNpmToken;
   }
-  const install = await runGroup(await installArgv(executable, workDir, pinnedPath, installEnv.HOME ?? homedir()), workDir, installEnv, workDeadlineAt, signal);
+  // EVAL-012: the install runs where the lockfile is, which is working_directory or a workspace root above it.
+  const installDir = executable.lockfileDirectory === null ? treeRoot : path.join(treeRoot, executable.lockfileDirectory);
+  const install = await runGroup(await installArgv(executable, pinnedPath), installDir, installEnv, workDeadlineAt, signal);
   if (signal.aborted) throw abortFault(signal);
   if (install.timedOut) throw new ItemFault("deadline_exceeded", "the dependency install ran past the work deadline");
   if (install.startFailed || install.exitCode !== 0) throw new ItemFault("install_failed", `the dependency install failed (${install.startFailed ? "could not start" : `exit ${install.exitCode ?? install.signal}`})`);
