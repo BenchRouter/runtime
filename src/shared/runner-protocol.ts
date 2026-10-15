@@ -156,7 +156,13 @@ export type RunnerReplaySemanticsFeature = (typeof RUNNER_REPLAY_SEMANTICS_FEATU
  * `pnpm-lock.yaml` with the job's pnpm. The server imports and leases such a route only to a
  * session that advertised it.
  */
-export const RUNNER_FEATURE_CAPABILITIES = ["case_subset", "case_repeats", "pnpm_install", ...RUNNER_REPLAY_SEMANTICS_FEATURES] as const;
+/**
+ * EVAL-012 `package_runner_launch`: the runtime starts an executable route whose argv begins with a
+ * package runner (`npx`, `npm`, `pnpm`, `bunx`) instead of the runtime itself, and never compares
+ * the job's runtime version with the manifest's `runtime_version`. The server imports and leases a
+ * package-runner route only to a session that advertised it.
+ */
+export const RUNNER_FEATURE_CAPABILITIES = ["case_subset", "case_repeats", "pnpm_install", "package_runner_launch", ...RUNNER_REPLAY_SEMANTICS_FEATURES] as const;
 export type RunnerFeatureCapability = (typeof RUNNER_FEATURE_CAPABILITIES)[number];
 
 /** EVAL-012: the frozen lockfile names an executable route may declare, by runtime. */
@@ -165,6 +171,34 @@ export const RUNNER_EXECUTABLE_LOCKFILES = {
   node: ["package-lock.json", "npm-shrinkwrap.json", RUNNER_PNPM_LOCKFILE],
   bun: ["bun.lock", "bun.lockb"]
 } as const satisfies Record<"node" | "bun", readonly string[]>;
+
+/**
+ * EVAL-012: the commands an executable route's argv may start with, by runtime. The runtime itself
+ * is replaced by the checked binary; a package runner is resolved on a PATH that puts the checked
+ * runtime's directory first, so the runner and the scripts it starts use that runtime.
+ */
+export const RUNNER_EXECUTABLE_LAUNCHERS = {
+  node: ["node", "npx", "npm", "pnpm"],
+  bun: ["bun", "bunx"]
+} as const satisfies Record<"node" | "bun", readonly string[]>;
+
+/** EVAL-012: the signed runtime features an argv launcher needs (`package_runner_launch` for a package runner). */
+export function executableLauncherFeatures(runtime: "node" | "bun", launcher: string): RunnerFeatureCapability[] {
+  const launchers: readonly string[] = RUNNER_EXECUTABLE_LAUNCHERS[runtime];
+  return launcher !== runtime && launchers.includes(launcher) ? ["package_runner_launch"] : [];
+}
+
+/**
+ * EVAL-012: a well-formed runtime version such as `22.23.2` or `v24.21.0` (a prerelease suffix
+ * after `-` is allowed). The manifest's `runtime_version` is informational: it is checked for this
+ * shape when present and never compared with the job's runtime.
+ */
+export function isExactRuntimeVersion(value: string): boolean {
+  if (value.length === 0 || value.length > 64) return false;
+  const core = (value.startsWith("v") ? value.slice(1) : value).split("-")[0] ?? "";
+  const parts = core.split(".");
+  return parts.length === 3 && parts.every((part) => part.length > 0 && [...part].every((c) => c >= "0" && c <= "9"));
+}
 
 /** EVAL-012: the lockfile rule as one sentence for validation messages. */
 export function executableLockfileRule(runtime: "node" | "bun"): string {
@@ -875,6 +909,18 @@ export interface RunnerUploadRequest {
    * the case rows. Not part of `payload_digest`.
    */
   quality: JsonObject | null;
+  /**
+   * Executable items only, optional: the runtime the evaluator ran on, as the checked binary's
+   * `--version` reported it (`package_runner_launch` runtimes). Recorded with the run's evidence for
+   * display and audit; never part of eval identity, reuse or carry.
+   */
+  evaluator_runtime?: RunnerEvaluatorRuntime;
+}
+
+/** EVAL-012: the runtime an executable evaluator ran on. */
+export interface RunnerEvaluatorRuntime {
+  name: "node" | "bun";
+  version: string;
 }
 
 /** §3.2, §3.3.2, §3.3.4, §3.3.5: why the runtime failed a work item. */

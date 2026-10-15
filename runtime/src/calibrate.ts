@@ -2,7 +2,7 @@
 // route's scorer against its own reference outputs and fixtures before any CI eval runs.
 // Every scorer call runs in a killable ScorerProcess child with a LIVE console; CI
 // replay keeps the console a no-op. Local commands never call the BenchRouter API.
-import { ARGV_LAUNCHERS } from "./executable";
+import { RUNNER_EXECUTABLE_LAUNCHERS } from "../../src/shared/runner-protocol";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { loadReplayCases } from "./cases";
@@ -473,10 +473,10 @@ async function calibrateRepositoryExecutable(control: ControlContext, route: Man
   }
   console.log("Mode: repository_executable");
   console.log(`Declared command: ${JSON.stringify(executable.argv)}`);
-  // EVAL-012: CI runs the evaluator only on the pinned runtime; say so here, not at the first dispatch.
-  const launchers: readonly string[] = ARGV_LAUNCHERS[executable.runtime];
+  // EVAL-012: CI starts the evaluator with the runtime or a package runner; say so here, not at the first dispatch.
+  const launchers: readonly string[] = RUNNER_EXECUTABLE_LAUNCHERS[executable.runtime];
   if (!launchers.includes(executable.argv[0] ?? "")) {
-    console.log(`Result: EXECUTABLE DECLARATION INVALID - argv must start with one of ${launchers.join(", ")} so it runs on the pinned ${executable.runtime} ${executable.runtimeVersion}.`);
+    console.log(`Result: EXECUTABLE DECLARATION INVALID - argv must start with one of ${launchers.join(", ")}.`);
     return false;
   }
   console.log(`Validated executable references: ${uniqueRefs.size}`);

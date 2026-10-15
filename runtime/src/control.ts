@@ -101,6 +101,39 @@ export function loadControlContext(): ControlContext {
   return context;
 }
 
+/**
+ * AUTH-007: the job's package-manager, registry, proxy and certificate settings, which the
+ * dependency install receives as the customer's own install would. Matched without regard to
+ * case. They come only from `stepEnv`, which never holds a parent-only value: no `BENCHROUTER_*`
+ * (the item's ecall token, the fetch token, the raw install grant), `ACTIONS_*` (the OIDC request
+ * token), `GITHUB_*` (the repository token), `RUNNER_*` or `INPUT_*` name ever reaches the install.
+ */
+export const INSTALL_PASS_THROUGH_PREFIXES = ["npm_config_", "pnpm_", "corepack_", "bun_"] as const;
+export const INSTALL_PASS_THROUGH_NAMES = [
+  "http_proxy", "https_proxy", "no_proxy",
+  "node_extra_ca_certs", "ssl_cert_file", "ssl_cert_dir",
+  "node_options",
+  "node_auth_token", "npm_token"
+] as const;
+/** npm and pnpm read `npm_config_<key>` (pnpm also `pnpm_config_<key>`) with `_` or `-`; the install forces this key on. */
+const IGNORE_SCRIPTS_KEYS = ["npm-config-ignore-scripts", "pnpm-config-ignore-scripts"];
+
+/**
+ * AUTH-007: the dependency install's env: the base allowlist, the job's install settings
+ * (`INSTALL_PASS_THROUGH_*`) except every name in `excluded` (the evaluator secrets every route
+ * of the manifest declares, since the workflow grants their union to the job), then `extra`. A job value never turns lifecycle scripts back on.
+ */
+export function installEnv(context: ControlContext, excluded: readonly string[], extra: StringMap): StringMap {
+  const env = childEnv(context);
+  for (const [name, value] of context.stepEnv) {
+    const lower = name.toLowerCase();
+    const listed = INSTALL_PASS_THROUGH_PREFIXES.some((prefix) => lower.startsWith(prefix)) || INSTALL_PASS_THROUGH_NAMES.some((known) => known === lower);
+    if (!listed || excluded.includes(name) || IGNORE_SCRIPTS_KEYS.includes(lower.replaceAll("_", "-"))) continue;
+    env[name] = value;
+  }
+  return { ...env, ...extra };
+}
+
 /** §3.9 minimal child env: the base allowlist plus the named extra values. */
 export function childEnv(context: ControlContext, extra: StringMap = {}): StringMap {
   const env: StringMap = {};
