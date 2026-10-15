@@ -16,6 +16,7 @@ import {
   RUNNER_EVAL_CALL_HEADER,
   type RunnerCallRole,
   type RunnerEvalCallHeader,
+  type RunnerEvaluatorRuntime,
   type RunnerWorkFailCause,
   type RunnerWorkItem
 } from "../../src/shared/runner-protocol";
@@ -112,7 +113,7 @@ export interface BatchOutcome {
 }
 
 export type ItemOutcome =
-  | { kind: "upload"; rows: UploadRow[]; quality: JsonObject | null; metrics?: ReplayMetrics[]; batch?: BatchOutcome }
+  | { kind: "upload"; rows: UploadRow[]; quality: JsonObject | null; metrics?: ReplayMetrics[]; batch?: BatchOutcome; evaluatorRuntime?: RunnerEvaluatorRuntime | null }
   | { kind: "fail"; cause: RunnerWorkFailCause; diagnostics: JsonObject; providerOnly: boolean; metrics?: ReplayMetrics[] };
 
 function encodeCallHeader(header: RunnerEvalCallHeader): string {

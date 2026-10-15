@@ -4,7 +4,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
-import { locateExecutableLockfile, type RunnerWorkMode } from "../../src/shared/runner-protocol";
+import { isExactRuntimeVersion, locateExecutableLockfile, type RunnerWorkMode } from "../../src/shared/runner-protocol";
 import { parseReplayCaseRepeatPolicy, type ReplayCaseRepeatPolicy } from "../../src/shared/replay-case-repeats";
 import { isJsonFiniteNumber, isJsonObject, isJsonString, ProtocolError, type JsonObject, type JsonValue } from "./json";
 
@@ -15,7 +15,8 @@ export interface ExecutableSpec {
   argv: string[];
   apiFamily: (typeof EXECUTABLE_API_FAMILIES)[number];
   runtime: "node" | "bun";
-  runtimeVersion: string;
+  /** EVAL-012: informational. Checked for shape when present; never compared with the job's runtime. */
+  runtimeVersion: string | null;
   /** As declared: relative to working_directory, at it or above it (EVAL-012). */
   lockfile: string;
   /** The lockfile in the repository, for example `app/pnpm-lock.yaml`. */
@@ -115,12 +116,6 @@ function positiveNumber(value: JsonValue | undefined, label: string, integer: bo
   return value;
 }
 
-function isExactVersion(value: string): boolean {
-  const core = (value.startsWith("v") ? value.slice(1) : value).split("-")[0] ?? "";
-  const parts = core.split(".");
-  return parts.length === 3 && parts.every((part) => part.length > 0 && [...part].every((c) => c >= "0" && c <= "9"));
-}
-
 function isEnvName(name: string): boolean {
   if (name.length === 0 || !(name[0] >= "A" && name[0] <= "Z")) return false;
   return [...name].every((c) => (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") || c === "_");
@@ -142,8 +137,8 @@ function parseExecutable(pack: JsonObject, prefix: string): ExecutableSpec {
   if (!family) fail(label("api_family"), "must be openai_chat_completions, anthropic_messages, or openai_responses");
   const runtime = requiredString(pack.runtime, label("runtime"));
   if (runtime !== "node" && runtime !== "bun") fail(label("runtime"), "must be node or bun");
-  const runtimeVersion = requiredString(pack.runtime_version, label("runtime_version"));
-  if (!isExactVersion(runtimeVersion)) fail(label("runtime_version"), "must be an exact runtime version");
+  const runtimeVersion = optionalString(pack.runtime_version, label("runtime_version"));
+  if (runtimeVersion !== null && !isExactRuntimeVersion(runtimeVersion)) fail(label("runtime_version"), "must be a runtime version such as 22.23.2 when present");
   const lockfile = requiredString(pack.lockfile, label("lockfile"));
   const workingDirectory = pack.working_directory === undefined || pack.working_directory === null ? null : repoPath(pack.working_directory, label("working_directory"));
   const located = locateExecutableLockfile(runtime, workingDirectory, lockfile);

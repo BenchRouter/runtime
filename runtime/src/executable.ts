@@ -1,10 +1,12 @@
 // One repository_executable work item (§3.3, §3.9, AUTH-007). It runs only on a
 // server-dispatched job, as the only item of that job, in a fresh workspace:
 //   1. dependency install in its own process group, lifecycle scripts disabled, with
-//      the install-only registry grant and no evaluator secret (§7.3 decision 1);
+//      the install-only registry grant, the job's package-manager, registry and proxy
+//      settings, and no evaluator secret of any route (§7.3 decision 1);
 //   2. a re-hash of the declared files after install (`tree_mutated`);
-//   3. the customer argv in its own process group, with only the eval-call contract
-//      (the item's call token and base URL) and the manifest-declared secret names;
+//   3. the customer argv (the runtime or a package runner, never a shell) in its own
+//      process group, with only the eval-call contract (the item's call token and base
+//      URL) and the manifest-declared secret names;
 //   4. the result receipt at `result_path`, parsed into case-result rows.
 // Every child is killed (SIGTERM, then SIGKILL after 5 s) at its deadline.
 import type { ChildProcess } from "node:child_process";
@@ -12,8 +14,15 @@ import { constants as fsConstants } from "node:fs";
 import { access, readFile, realpath, rm } from "node:fs/promises";
 import path from "node:path";
 import type { EvalExecutionFailureReason } from "../../src/shared/failure-codes";
-import { RUNNER_PNPM_LOCKFILE, type RunnerWorkItem, type Sha256Digest } from "../../src/shared/runner-protocol";
-import { childEnv, type ControlContext } from "./control";
+import {
+  isExactRuntimeVersion,
+  RUNNER_EXECUTABLE_LAUNCHERS,
+  RUNNER_PNPM_LOCKFILE,
+  type RunnerEvaluatorRuntime,
+  type RunnerWorkItem,
+  type Sha256Digest
+} from "../../src/shared/runner-protocol";
+import { childEnv, installEnv, type ControlContext } from "./control";
 import { isJsonFiniteNumber, isJsonObject, isJsonString, parseJsonText, ProtocolError, type JsonObject, type JsonValue } from "./json";
 import type { ExecutableSpec, ManifestRoute } from "./manifest";
 import { killGroup, spawnGroup } from "./processes";
@@ -31,6 +40,8 @@ export interface ExecutableEnvironment {
   route: ManifestRoute;
   item: RunnerWorkItem;
   fileHashes: Record<string, Sha256Digest>;
+  /** AUTH-007: the evaluator secrets every route of the manifest declares; none reaches the install. */
+  evaluatorSecretNames: readonly string[];
   signal: AbortSignal;
 }
 
@@ -134,37 +145,41 @@ export async function runExecutableItem(env: ExecutableEnvironment): Promise<Ite
   const workDir = executable.workingDirectory === null ? treeRoot : path.join(treeRoot, executable.workingDirectory);
   const workDeadlineAt = Date.parse(item.work_deadline_at);
 
-  // 0. EVAL-012: bind the evaluator to the pinned runtime. The runtime binary is resolved
-  // once from PATH and its version checked in a tracked child. argv[0] must be the runtime
-  // itself and is replaced by that checked binary, so the evaluator process is the pinned
-  // runtime; its directory also goes first on every child's PATH. (What the evaluator
-  // itself spawns later is outside what a runner can prove.)
-  const runtimeBinary = await resolveOnPath(executable.runtime, control.stepEnv.get("PATH") ?? "");
+  // 0. EVAL-012: bind the evaluator to the job's runtime. The runtime binary is resolved once
+  // from PATH and its directory goes first on every child's PATH. argv[0] is the runtime itself,
+  // which is replaced by that checked binary, or a package runner (npx, npm, pnpm, bunx), which is
+  // resolved on that PATH, so the runner and the scripts it starts find the checked runtime first.
+  // A package runner puts node_modules/.bin ahead of that directory for the scripts it runs, so the
+  // runtime cannot prove which binary such a script execs; neither can it for what the evaluator
+  // spawns later. The job's runtime version is recorded, never compared with `runtime_version`.
+  const stepPath = control.stepEnv.get("PATH") ?? "";
+  const runtimeBinary = await resolveOnPath(executable.runtime, stepPath);
   if (runtimeBinary === null) throw new ItemFault("harness_failed", `${executable.runtime} is not on PATH; set it up in the workflow's customer-setup block`);
   const launcher = executable.argv[0] ?? "";
-  const launchers: readonly string[] = ARGV_LAUNCHERS[executable.runtime];
+  const launchers: readonly string[] = RUNNER_EXECUTABLE_LAUNCHERS[executable.runtime];
   if (!launchers.includes(launcher)) {
-    throw new ItemFault("harness_failed", `argv must start with one of ${ARGV_LAUNCHERS[executable.runtime].join(", ")} so it runs on the pinned ${executable.runtime}`);
+    throw new ItemFault("harness_failed", `argv must start with one of ${launchers.join(", ")}`);
   }
-  const pinnedPath = `${path.dirname(runtimeBinary)}${path.delimiter}${control.stepEnv.get("PATH") ?? ""}`;
+  const pinnedPath = `${path.dirname(runtimeBinary)}${path.delimiter}${stepPath}`;
+  const launcherBinary = launcher === executable.runtime ? runtimeBinary : await findOnPath(launcher, pinnedPath);
+  if (launcherBinary === null) throw new ItemFault("harness_failed", `${launcher} is not on PATH; set it up in the workflow's customer-setup block`);
   const probe = await runGroup([runtimeBinary, "--version"], workDir, childEnv(control, { PATH: pinnedPath }), Math.min(workDeadlineAt, Date.now() + 30_000), signal, true);
   if (signal.aborted) throw abortFault(signal);
-  const found = probe.exitCode === 0 ? probe.stdout.trim() : null;
-  if (found === null || normalizeVersion(found) !== normalizeVersion(executable.runtimeVersion)) {
-    throw new ItemFault("harness_failed", `the route pins ${executable.runtime} ${executable.runtimeVersion}, but the job has ${found ?? "none"}; set it up in the workflow's customer-setup block`);
-  }
+  const observed = probe.exitCode === 0 ? probe.stdout.trim() : "";
+  const evaluatorRuntime: RunnerEvaluatorRuntime | null = isExactRuntimeVersion(observed) ? { name: executable.runtime, version: observed } : null;
+  console.log(`BenchRouter: the evaluator runs on ${executable.runtime} ${evaluatorRuntime?.version ?? "(version unknown)"} at ${runtimeBinary}${executable.runtimeVersion === null ? "" : `; the manifest notes ${executable.runtimeVersion}`}.`);
 
-  // 1. Install: the install-only registry grant, no evaluator secret, scripts disabled.
-  const installEnv: StringMap = childEnv(control, { npm_config_ignore_scripts: "true", PATH: pinnedPath });
+  // 1. Install: the install-only registry grant, the job's install settings, no evaluator secret, scripts disabled.
+  const install: StringMap = installEnv(control, [...env.evaluatorSecretNames, ...executable.secretEnv], { npm_config_ignore_scripts: "true", PATH: pinnedPath });
   if (control.installNpmToken !== null) {
-    for (const name of INSTALL_TOKEN_ENV_NAMES) installEnv[name] = control.installNpmToken;
+    for (const name of INSTALL_TOKEN_ENV_NAMES) install[name] = control.installNpmToken;
   }
   // EVAL-012: the install runs where the lockfile is, which is working_directory or a workspace root above it.
   const installDir = executable.lockfileDirectory === null ? treeRoot : path.join(treeRoot, executable.lockfileDirectory);
-  const install = await runGroup(await installArgv(executable, pinnedPath), installDir, installEnv, workDeadlineAt, signal);
+  const installRun = await runGroup(await installArgv(executable, pinnedPath), installDir, install, workDeadlineAt, signal);
   if (signal.aborted) throw abortFault(signal);
-  if (install.timedOut) throw new ItemFault("deadline_exceeded", "the dependency install ran past the work deadline");
-  if (install.startFailed || install.exitCode !== 0) throw new ItemFault("install_failed", `the dependency install failed (${install.startFailed ? "could not start" : `exit ${install.exitCode ?? install.signal}`})`);
+  if (installRun.timedOut) throw new ItemFault("deadline_exceeded", "the dependency install ran past the work deadline");
+  if (installRun.startFailed || installRun.exitCode !== 0) throw new ItemFault("install_failed", `the dependency install failed (${installRun.startFailed ? "could not start" : `exit ${installRun.exitCode ?? installRun.signal}`})`);
 
   // 2. §3.2: the install must not change a declared file.
   if (!sameHashes(await hashDeclaredFiles(treeRoot, route), env.fileHashes)) throw new ItemFault("tree_mutated", "the dependency install changed a declared file");
@@ -186,7 +201,7 @@ export async function runExecutableItem(env: ExecutableEnvironment): Promise<Ite
   // A receipt left in the tree never counts: only one this evaluator run writes does.
   await rm(path.join(treeRoot, executable.resultPath), { force: true });
   const timeoutAt = Math.min(workDeadlineAt, Date.now() + executable.timeoutMinutes * 60_000);
-  const evaluatorArgv = [runtimeBinary, ...executable.argv.slice(1)];
+  const evaluatorArgv = [launcherBinary, ...executable.argv.slice(1)];
   const run = await runGroup(evaluatorArgv, workDir, evaluatorEnv, timeoutAt, signal);
   if (signal.aborted) throw abortFault(signal);
   if (run.timedOut && timeoutAt >= workDeadlineAt) throw new ItemFault("deadline_exceeded", "the evaluator ran past the work deadline");
@@ -196,35 +211,28 @@ export async function runExecutableItem(env: ExecutableEnvironment): Promise<Ite
 
   // 4. The result receipt.
   const receipt = await readReceipt(path.join(treeRoot, executable.resultPath), executable.primaryMetric, item.model_run.model);
-  return { kind: "upload", rows: receipt.rows, quality: receipt.quality };
+  return { kind: "upload", rows: receipt.rows, quality: receipt.quality, evaluatorRuntime };
 }
 
-function normalizeVersion(value: string): string {
-  const trimmed = value.trim();
-  return trimmed.startsWith("v") ? trimmed.slice(1) : trimmed;
-}
-
-/** The launchers that start on the pinned runtime found first on PATH. */
-// Package tools (npm run, npx, pnpm, yarn, bunx) put node_modules/.bin first on PATH, where a
-// dependency can ship its own runtime binary, so only the runtime itself may start the evaluator.
-export const ARGV_LAUNCHERS = {
-  node: ["node"],
-  bun: ["bun"]
-} as const satisfies Record<"node" | "bun", readonly string[]>;
-
-/** The first executable `name` on PATH, as an absolute path. */
-async function resolveOnPath(name: string, searchPath: string): Promise<string | null> {
+/** The first executable `name` on PATH, as found there (a multi-call binary such as `bunx` keeps its name). */
+async function findOnPath(name: string, searchPath: string): Promise<string | null> {
   for (const dir of searchPath.split(path.delimiter)) {
     if (dir.length === 0 || !path.isAbsolute(dir)) continue;
     const candidate = path.join(dir, name);
     try {
       await access(candidate, fsConstants.X_OK);
-      return await realpath(candidate);
+      return candidate;
     } catch {
       // Not here.
     }
   }
   return null;
+}
+
+/** The first executable `name` on PATH, as an absolute path with symlinks resolved. */
+async function resolveOnPath(name: string, searchPath: string): Promise<string | null> {
+  const found = await findOnPath(name, searchPath);
+  return found === null ? null : realpath(found);
 }
 
 function isMetricName(name: string): boolean {

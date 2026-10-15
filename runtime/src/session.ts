@@ -189,6 +189,8 @@ async function dispatchClaim(): Promise<string | null> {
 interface PreparedRoute {
   route: ManifestRoute;
   fileHashes: Record<string, Sha256Digest>;
+  /** AUTH-007: every route's declared evaluator secrets; the workflow grants their union to the job. */
+  evaluatorSecretNames: string[];
 }
 
 function reportRetireAt(retireAt: string): void {
@@ -277,10 +279,11 @@ async function prepare(control: ControlContext, client: RunnerClient, hello: Run
   const byKey = new Map<string, PreparedRoute>();
   // §3.3.5: the case index is sent only to a server that accepts it, by a runtime that runs subsets.
   const reportCaseIndex = control.features.includes("case_subset") && (hello.server_features ?? []).includes("case_index");
+  const evaluatorSecretNames = [...new Set(manifest.routes.flatMap((route) => route.executable?.secretEnv ?? []))].sort();
   for (const route of manifest.routes) {
     const contract = await routeContract(tree.root, route, reportCaseIndex);
     routes.push(contract);
-    byKey.set(route.routeId, { route, fileHashes: contract.file_hashes });
+    byKey.set(route.routeId, { route, fileHashes: contract.file_hashes, evaluatorSecretNames });
   }
   const needsAncestry = hello.purpose === "snapshot_refresh" || control.eventName === "push";
   const ancestry = needsAncestry ? await ancestryProof(control, tree.root, hello.eval_sha, manifest.product.defaultBranch, hello.last_imported_sha) : null;
@@ -505,7 +508,7 @@ async function executeItem(
   if (!sameHashes(await hashDeclaredFiles(treeRoot, entry.route), entry.fileHashes)) throw new ItemFault("tree_mutated", "a declared file changed after the snapshot");
   if (item.mode !== entry.route.mode) throw new ItemFault("mode_unsupported", `the item mode ${item.mode} does not match route ${entry.route.routeId}`);
   if (item.mode === "repository_executable") {
-    return runExecutableItem({ control, treeRoot, route: entry.route, item, fileHashes: entry.fileHashes, signal: lease.controller.signal });
+    return runExecutableItem({ control, treeRoot, route: entry.route, item, fileHashes: entry.fileHashes, evaluatorSecretNames: entry.evaluatorSecretNames, signal: lease.controller.signal });
   }
   const cases = await loadReplayCases(treeRoot, entry.route);
   return runReplayItem({
@@ -540,6 +543,8 @@ async function commit(control: ControlContext, client: RunnerClient, item: Runne
         case_results: rows,
         quality: outcome.quality
       };
+      // EVAL-012: the runtime the evaluator ran on, recorded with the evidence only.
+      if (outcome.evaluatorRuntime) request.evaluator_runtime = outcome.evaluatorRuntime;
       if (batch !== undefined) {
         // §3.3.5: a batch call repeats its grant and names every case of it once.
         request.case_ids = batch.caseIds;
