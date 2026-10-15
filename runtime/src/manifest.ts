@@ -4,7 +4,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
-import { executableLockfileRule, isExecutableLockfile, type RunnerWorkMode } from "../../src/shared/runner-protocol";
+import { locateExecutableLockfile, type RunnerWorkMode } from "../../src/shared/runner-protocol";
 import { parseReplayCaseRepeatPolicy, type ReplayCaseRepeatPolicy } from "../../src/shared/replay-case-repeats";
 import { isJsonFiniteNumber, isJsonObject, isJsonString, ProtocolError, type JsonObject, type JsonValue } from "./json";
 
@@ -16,9 +16,12 @@ export interface ExecutableSpec {
   apiFamily: (typeof EXECUTABLE_API_FAMILIES)[number];
   runtime: "node" | "bun";
   runtimeVersion: string;
+  /** As declared: relative to working_directory, at it or above it (EVAL-012). */
   lockfile: string;
-  /** The lockfile in the repository: `<working_directory>/<lockfile>`, or `<lockfile>` at the root. */
+  /** The lockfile in the repository, for example `app/pnpm-lock.yaml`. */
   lockfilePath: string;
+  /** The directory that holds the lockfile, where the install runs; null for the repository root. */
+  lockfileDirectory: string | null;
   workingDirectory: string | null;
   inputRefs: string[];
   acceptanceRefs: string[];
@@ -141,10 +144,10 @@ function parseExecutable(pack: JsonObject, prefix: string): ExecutableSpec {
   if (runtime !== "node" && runtime !== "bun") fail(label("runtime"), "must be node or bun");
   const runtimeVersion = requiredString(pack.runtime_version, label("runtime_version"));
   if (!isExactVersion(runtimeVersion)) fail(label("runtime_version"), "must be an exact runtime version");
-  const lockfile = repoPath(pack.lockfile, label("lockfile"));
+  const lockfile = requiredString(pack.lockfile, label("lockfile"));
   const workingDirectory = pack.working_directory === undefined || pack.working_directory === null ? null : repoPath(pack.working_directory, label("working_directory"));
-  const lockName = path.posix.basename(lockfile);
-  if (!isExecutableLockfile(runtime, lockName)) fail(label("lockfile"), executableLockfileRule(runtime));
+  const located = locateExecutableLockfile(runtime, workingDirectory, lockfile);
+  if (!located.ok) fail(label("lockfile"), located.message);
   const secretEnv = uniqueList(pack.secret_env, label("secret_env"), false, false);
   if (secretEnv.some((name) => !isEnvName(name) || ["BENCHROUTER_", "ACTIONS_", "GITHUB_"].some((reserved) => name.startsWith(reserved)))) {
     fail(label("secret_env"), "contains a reserved or invalid name");
@@ -155,7 +158,8 @@ function parseExecutable(pack: JsonObject, prefix: string): ExecutableSpec {
     runtime,
     runtimeVersion,
     lockfile,
-    lockfilePath: workingDirectory === null ? lockfile : path.posix.join(workingDirectory, lockfile),
+    lockfilePath: located.path,
+    lockfileDirectory: located.directory,
     workingDirectory,
     inputRefs: uniqueList(pack.input_refs, label("input_refs"), true),
     acceptanceRefs: uniqueList(pack.acceptance_refs, label("acceptance_refs"), true),
