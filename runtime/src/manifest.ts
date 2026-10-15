@@ -4,7 +4,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
-import type { RunnerWorkMode } from "../../src/shared/runner-protocol";
+import { executableLockfileRule, isExecutableLockfile, type RunnerWorkMode } from "../../src/shared/runner-protocol";
 import { parseReplayCaseRepeatPolicy, type ReplayCaseRepeatPolicy } from "../../src/shared/replay-case-repeats";
 import { isJsonFiniteNumber, isJsonObject, isJsonString, ProtocolError, type JsonObject, type JsonValue } from "./json";
 
@@ -144,8 +144,7 @@ function parseExecutable(pack: JsonObject, prefix: string): ExecutableSpec {
   const lockfile = repoPath(pack.lockfile, label("lockfile"));
   const workingDirectory = pack.working_directory === undefined || pack.working_directory === null ? null : repoPath(pack.working_directory, label("working_directory"));
   const lockName = path.posix.basename(lockfile);
-  if (runtime === "bun" && lockName !== "bun.lock" && lockName !== "bun.lockb") fail(label("lockfile"), "must be bun.lock or bun.lockb for Bun");
-  if (runtime === "node" && lockName !== "package-lock.json" && lockName !== "npm-shrinkwrap.json") fail(label("lockfile"), "must be package-lock.json or npm-shrinkwrap.json for Node");
+  if (!isExecutableLockfile(runtime, lockName)) fail(label("lockfile"), executableLockfileRule(runtime));
   const secretEnv = uniqueList(pack.secret_env, label("secret_env"), false, false);
   if (secretEnv.some((name) => !isEnvName(name) || ["BENCHROUTER_", "ACTIONS_", "GITHUB_"].some((reserved) => name.startsWith(reserved)))) {
     fail(label("secret_env"), "contains a reserved or invalid name");

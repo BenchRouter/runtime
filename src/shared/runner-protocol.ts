@@ -151,8 +151,32 @@ export function parseRunnerWorkMode(value: JsonValue): RunnerWorkMode | null {
 export const RUNNER_REPLAY_SEMANTICS_FEATURES = ["replay_semantics_1"] as const;
 export type RunnerReplaySemanticsFeature = (typeof RUNNER_REPLAY_SEMANTICS_FEATURES)[number];
 
-export const RUNNER_FEATURE_CAPABILITIES = ["case_subset", "case_repeats", ...RUNNER_REPLAY_SEMANTICS_FEATURES] as const;
+/**
+ * EVAL-012 `pnpm_install`: the runtime installs a Node executable route whose lockfile is
+ * `pnpm-lock.yaml` with the job's pnpm. The server imports and leases such a route only to a
+ * session that advertised it.
+ */
+export const RUNNER_FEATURE_CAPABILITIES = ["case_subset", "case_repeats", "pnpm_install", ...RUNNER_REPLAY_SEMANTICS_FEATURES] as const;
 export type RunnerFeatureCapability = (typeof RUNNER_FEATURE_CAPABILITIES)[number];
+
+/** EVAL-012: the frozen lockfile names an executable route may declare, by runtime. */
+export const RUNNER_PNPM_LOCKFILE = "pnpm-lock.yaml";
+export const RUNNER_EXECUTABLE_LOCKFILES = {
+  node: ["package-lock.json", "npm-shrinkwrap.json", RUNNER_PNPM_LOCKFILE],
+  bun: ["bun.lock", "bun.lockb"]
+} as const satisfies Record<"node" | "bun", readonly string[]>;
+
+/** EVAL-012: the lockfile rule as one sentence for validation messages. */
+export function executableLockfileRule(runtime: "node" | "bun"): string {
+  const names = RUNNER_EXECUTABLE_LOCKFILES[runtime];
+  return `must be ${names.slice(0, -1).join(", ")} or ${names[names.length - 1]} for ${runtime === "node" ? "Node" : "Bun"}`;
+}
+
+/** EVAL-012: whether a lockfile name is one the runtime accepts for that runtime. */
+export function isExecutableLockfile(runtime: "node" | "bun", lockfile: string): boolean {
+  const names: readonly string[] = RUNNER_EXECUTABLE_LOCKFILES[runtime];
+  return names.includes(lockfile);
+}
 
 /** EVAL-002: the one replay semantics revision a parsed feature list declares, or null. */
 export function replaySemanticsRevision(features: readonly RunnerFeatureCapability[]): RunnerReplaySemanticsFeature | null {

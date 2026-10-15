@@ -71,7 +71,10 @@ export const EVAL_RUN_FAILURE_REASON_CODES = [
   "repository_blocked",
   // RUN-001 §3.3.4: the route has more cases than one evaluation run supports, so no
   // worker can run it. The code keeps its first name, from when the limit was one job's time.
-  "work_exceeds_job_window"
+  "work_exceeds_job_window",
+  // RUN-001 §3.3.1: the job failed in setup before any model call, so the server
+  // stopped the whole result set (`src/runner/setup-stop.ts`). Server-written only.
+  "setup_failed"
 ] as const;
 export type EvalRunFailureReasonCode = (typeof EVAL_RUN_FAILURE_REASON_CODES)[number];
 
@@ -222,6 +225,12 @@ export interface EvalRunFailureDiagnostic {
   verification?: EvalFailureVerification;
   diagnostic_rejected?: true;
   retry?: EvalRunRetryDisposition;
+  /**
+   * RUN-001 / DATA-001: the signed runtime's own reason for a work failure that
+   * has no case detail (for example a runtime version the job does not have).
+   * Server-written only, from the runtime's fault text; never an exception message.
+   */
+  runtime_reason?: string;
 }
 
 export type ParseFailureDiagnosticResult =
@@ -260,6 +269,23 @@ export function parseStoredEvalRunFailureDiagnostic(json: string | null): EvalRu
   if (!parsedJson.ok) return null;
   const parsed = parseDiagnostic(parsedJson.value, true);
   return parsed.ok ? parsed.value : null;
+}
+
+/**
+ * RUN-001 / DATA-001: the runtime's fault reason, bounded like a case message
+ * (500 characters) and on one line. The runtime quotes free-form evaluator and
+ * scorer text with JSON.stringify (an invalid metric name, a refused call
+ * endpoint), so a reason with a double quote is dropped whole, as is one with
+ * any control character. Its other interpolations are fixed codes, numbers,
+ * identifiers the server already stores, and runtime versions.
+ */
+export function parseRuntimeFaultReason<Value>(value: Value): string | null {
+  if (!text(value, MAX_MESSAGE, false) || value.includes('"')) return null;
+  for (const char of value) {
+    const code = char.charCodeAt(0);
+    if (code < 32 || code === 127) return null;
+  }
+  return value;
 }
 
 /**
@@ -363,7 +389,7 @@ function parseDiagnostic<Value>(value: Value, stored: boolean): ParseFailureDiag
   const allowed = new Set([
     "v", "source", "reason_code", "failed_step", "github_conclusion", "cases",
     "execution",
-    ...(stored ? ["verification", "diagnostic_rejected", "retry"] : [])
+    ...(stored ? ["verification", "diagnostic_rejected", "retry", "runtime_reason"] : [])
   ]);
   const unknown = unknownKey(value, allowed);
   if (unknown) return invalid(`Failure diagnostic ${unknown} is not allowed`);
@@ -378,9 +404,12 @@ function parseDiagnostic<Value>(value: Value, stored: boolean): ParseFailureDiag
   if (!cases.ok) return cases;
   const execution = parseExecution(value.execution);
   if (!execution.ok) return execution;
+  // RUN-001 §3.3.1: the server stores an evaluator exit before any model call as
+  // `setup_failed` with its execution detail; an upload never carries that reason.
+  const executionReason = value.reason_code === "workflow_step_failed" || (stored && value.reason_code === "setup_failed");
   if (
     execution.value &&
-    (value.source !== "workflow_fail_step" || value.reason_code !== "workflow_step_failed" || cases.value !== null)
+    (value.source !== "workflow_fail_step" || !executionReason || cases.value !== null)
   ) {
     return invalid("Failure diagnostic execution does not match a terminal evaluator failure");
   }
@@ -404,6 +433,10 @@ function parseDiagnostic<Value>(value: Value, stored: boolean): ParseFailureDiag
     const retry = parseRetryDisposition(value.retry);
     if (!retry.ok) return retry;
     if (retry.value) result.retry = retry.value;
+    // A stored reason that is not valid text is dropped. It never makes the
+    // diagnostic unreadable, so it cannot change a retry classification.
+    const runtimeReason = parseRuntimeFaultReason(value.runtime_reason);
+    if (runtimeReason !== null) result.runtime_reason = runtimeReason;
   }
   return { ok: true, value: result };
 }

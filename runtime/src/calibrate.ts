@@ -5,6 +5,7 @@
 import { ARGV_LAUNCHERS } from "./executable";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { RUNNER_PNPM_LOCKFILE } from "../../src/shared/runner-protocol";
 import { loadReplayCases } from "./cases";
 import type { ControlContext } from "./control";
 import { errorMessage, isJsonObject, isJsonString, parseJsonText, ProtocolError, type JsonObject, type JsonValue } from "./json";
@@ -464,7 +465,11 @@ async function calibrateRepositoryExecutable(control: ControlContext, route: Man
     try {
       await readFile(path.join(control.controlRoot, filePath));
     } catch (error) {
-      throw new Error(`Missing or unreadable repository executable reference ${filePath} (${labels.join(", ")}): ${errorMessage(error instanceof Error ? error : String(error))}`);
+      // EVAL-012: the install runs in working_directory, so the lockfile must be there too.
+      const workspaceHint = labels.includes("lockfile") && path.posix.basename(filePath) === RUNNER_PNPM_LOCKFILE && executable.workingDirectory !== null
+        ? " A pnpm workspace keeps pnpm-lock.yaml at its root: set working_directory to the workspace root (omit it for the repository root) and point argv at the package's evaluator script."
+        : "";
+      throw new Error(`Missing or unreadable repository executable reference ${filePath} (${labels.join(", ")}): ${errorMessage(error instanceof Error ? error : String(error))}${workspaceHint}`);
     }
   }
   console.log("Mode: repository_executable");
