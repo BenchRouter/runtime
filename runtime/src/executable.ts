@@ -22,6 +22,7 @@ import {
   type RunnerWorkItem,
   type Sha256Digest
 } from "../../src/shared/runner-protocol";
+import { sdkBaseUrlForEnv } from "../../src/shared/sdk-base-url";
 import { childEnv, installEnv, type ControlContext } from "./control";
 import { isJsonFiniteNumber, isJsonObject, isJsonString, parseJsonText, ProtocolError, type JsonObject, type JsonValue } from "./json";
 import type { ExecutableSpec, ManifestRoute } from "./manifest";
@@ -192,7 +193,8 @@ export async function runExecutableItem(env: ExecutableEnvironment): Promise<Ite
     BENCHROUTER_EVAL_BASE_URL: baseUrl,
     BENCHROUTER_ROUTE_ID: route.routeId
   });
-  if (route.baseUrlEnv !== null) evaluatorEnv[route.baseUrlEnv] = baseUrl;
+  // EVAL-012: the call site's base URL env gets the value setup gives it for live traffic.
+  if (route.baseUrlEnv !== null) evaluatorEnv[route.baseUrlEnv] = sdkBaseUrlForEnv(baseUrl, route.baseUrlEnv);
   // The workflow grants these values on server-dispatched runs only; the manifest names them.
   for (const name of executable.secretEnv) {
     const value = control.stepEnv.get(name);
