@@ -4,4 +4,5 @@ src/shared/json-parse-contracts.ts
 src/shared/parsing.ts
 src/shared/failure-codes.ts
 src/shared/rejection-reason.ts
+src/shared/sdk-base-url.ts
 src/setup-packet/scorer-sandbox-source.ts
