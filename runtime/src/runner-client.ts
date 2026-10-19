@@ -52,6 +52,7 @@ import {
   type JsonValue
 } from "./json";
 import { send, TargetHolds, TransportError, type HttpReply, type StringMap } from "./transport";
+import { EVAL_RUN_FAILURE_REASON_CODES } from "../../src/shared/failure-codes";
 
 const API_ATTEMPT_TIMEOUT_MS = 30_000;
 const API_CALL_BUDGET_MS = 3 * 60_000;
@@ -114,7 +115,7 @@ function parseAwaitingSnapshot(body: JsonObject): RunnerAwaitingSnapshotOutcome 
 function parseReceipt(value: JsonValue | undefined): RunnerReceipt {
   const receipt = objectOf(value, "receipt");
   const key = readString(receipt, "idempotency_key", "receipt");
-  return {
+  const parsed: RunnerReceipt = {
     receipt_id: readString(receipt, "receipt_id", "receipt"),
     // SAFETY: the server echoes the key this client sent; its template is checked by the server.
     idempotency_key: key as RunnerReceipt["idempotency_key"],
@@ -124,6 +125,10 @@ function parseReceipt(value: JsonValue | undefined): RunnerReceipt {
     terminal: oneOf(readString(receipt, "terminal", "receipt"), ["uploaded", "failed", "accepted", "released"] as const, "receipt.terminal"),
     committed_at: readString(receipt, "committed_at", "receipt")
   };
+  // §3.3.1: the stored failure reason is for the log only, so an unknown code is left out.
+  const failureReason = EVAL_RUN_FAILURE_REASON_CODES.find((code) => code === receipt.failure_reason);
+  if (failureReason !== undefined) parsed.failure_reason = failureReason;
+  return parsed;
 }
 
 /** §3.3: one leased work item. Unknown modes and capability names fail closed. */

@@ -559,6 +559,9 @@ async function commit(control: ControlContext, client: RunnerClient, item: Runne
         // §3.3.5: a batch with case failures ends its run as failed; that is data, like `case_failures` of a whole run.
         if (failures.length > 0) {
           summary.failed(item.work_id, "case_failures", failureClass("case_failures", failures.every((failure) => failure.stage === "model_call")), item.model_run.model);
+        } else if (committed.receipt.failure_reason !== undefined) {
+          // §3.3.1: the reason the server stored, such as `case_failures` from an earlier batch (#448).
+          summary.failed(item.work_id, committed.receipt.failure_reason, "infra", item.model_run.model);
         } else {
           summary.failed(item.work_id, "upload_error", "infra", "the server recorded the upload as a failure");
         }

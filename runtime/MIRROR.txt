@@ -5,4 +5,6 @@ src/shared/parsing.ts
 src/shared/failure-codes.ts
 src/shared/rejection-reason.ts
 src/shared/sdk-base-url.ts
+src/shared/spend-bound.ts
+src/shared/time-bound.ts
 src/setup-packet/scorer-sandbox-source.ts
