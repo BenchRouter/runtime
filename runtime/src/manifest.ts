@@ -28,9 +28,6 @@ export interface ExecutableSpec {
   acceptanceRefs: string[];
   resultPath: string;
   primaryMetric: string;
-  maxModelCalls: number;
-  maxCostUsd: number;
-  maxCostPerCallUsd: number;
   timeoutMinutes: number;
   secretEnv: string[];
 }
@@ -160,13 +157,9 @@ function parseExecutable(pack: JsonObject, prefix: string): ExecutableSpec {
     acceptanceRefs: uniqueList(pack.acceptance_refs, label("acceptance_refs"), true),
     resultPath: repoPath(pack.result_path, label("result_path")),
     primaryMetric: requiredString(pack.primary_metric, label("primary_metric")),
-    maxModelCalls: positiveNumber(pack.max_model_calls, label("max_model_calls"), true),
-    maxCostUsd: positiveNumber(pack.max_cost_usd, label("max_cost_usd"), false),
-    maxCostPerCallUsd: positiveNumber(pack.max_cost_per_call_usd, label("max_cost_per_call_usd"), false),
     timeoutMinutes: positiveNumber(pack.timeout_minutes, label("timeout_minutes"), true),
     secretEnv
   };
-  if (spec.maxCostPerCallUsd > spec.maxCostUsd) fail(label("max_cost_per_call_usd"), "must not exceed max_cost_usd");
   if (spec.acceptanceRefs.some((ref) => spec.inputRefs.includes(ref))) fail(label("input_refs"), "and acceptance_refs must not overlap");
   return spec;
 }

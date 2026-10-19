@@ -7,6 +7,7 @@ import {
 } from "./json-parse-contracts";
 import { isRecord } from "./parsing";
 import { parseStoredRejectionReason, storedRejectionReason, type RejectionReason } from "./rejection-reason";
+import type { SpendBoundStop } from "./spend-bound";
 
 export const EVAL_CASE_FAILURE_STAGES = ["model_call", "judge", "scorer", "harness"] as const;
 export type EvalCaseFailureStage = (typeof EVAL_CASE_FAILURE_STAGES)[number];
@@ -263,6 +264,11 @@ export interface EvalRunFailureDiagnostic {
    * Server-written only, from the runtime's fault text; never an exception message.
    */
   runtime_reason?: string;
+  /**
+   * EVAL-012: the amounts of a run stopped at its server-owned spend bound.
+   * Server-written only, from the run row (`prepareModelRunFailure`).
+   */
+  spend_bound?: SpendBoundStop;
 }
 
 export type ParseFailureDiagnosticResult =
@@ -421,7 +427,7 @@ function parseDiagnostic<Value>(value: Value, stored: boolean): ParseFailureDiag
   const allowed = new Set([
     "v", "source", "reason_code", "failed_step", "github_conclusion", "cases",
     "execution",
-    ...(stored ? ["verification", "diagnostic_rejected", "retry", "runtime_reason"] : [])
+    ...(stored ? ["verification", "diagnostic_rejected", "retry", "runtime_reason", "spend_bound"] : [])
   ]);
   const unknown = unknownKey(value, allowed);
   if (unknown) return invalid(`Failure diagnostic ${unknown} is not allowed`);
@@ -469,8 +475,18 @@ function parseDiagnostic<Value>(value: Value, stored: boolean): ParseFailureDiag
     // diagnostic unreadable, so it cannot change a retry classification.
     const runtimeReason = parseRuntimeFaultReason(value.runtime_reason);
     if (runtimeReason !== null) result.runtime_reason = runtimeReason;
+    // EVAL-012: display detail only; an unreadable one is dropped the same way.
+    const spendBound = parseSpendBoundStop(value.spend_bound);
+    if (spendBound !== null) result.spend_bound = spendBound;
   }
   return { ok: true, value: result };
+}
+
+function parseSpendBoundStop<Value>(value: Value): SpendBoundStop | null {
+  if (!isRecord(value) || unknownKey(value, new Set(["spent_usd", "bound_usd", "reference_usd"]))) return null;
+  const amounts = [value.spent_usd, value.bound_usd, value.reference_usd];
+  if (!amounts.every((amount) => isJsonFiniteNumber(amount) && amount >= 0)) return null;
+  return { spent_usd: Number(value.spent_usd), bound_usd: Number(value.bound_usd), reference_usd: Number(value.reference_usd) };
 }
 
 function parseExecution<Value>(
