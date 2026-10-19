@@ -9,6 +9,7 @@
 // major, the work mode and capability names (principle 5: fail closed on the unknown).
 // It holds no other runtime logic.
 
+import type { EvalRunFailureReasonCode } from "./failure-codes";
 import type { JsonObject, JsonValue } from "./json-parse-contracts";
 
 // ---------------------------------------------------------------------------
@@ -458,6 +459,12 @@ export const RUNNER_ERROR_CODES = [
   "rate_limited"
 ] as const;
 export type RunnerErrorCode = (typeof RUNNER_ERROR_CODES)[number];
+
+/**
+ * §3.3.2: the operation-ledger answers that mean "the same operation is still
+ * settling". A case that fails with one never saw its operation's outcome.
+ */
+export const RUNNER_SETTLING_CALL_CODES: ReadonlySet<string> = new Set<RunnerErrorCode>(["call_in_progress", "call_outcome_unknown"]);
 
 export interface RunnerErrorBody {
   error: { code: RunnerErrorCode; message: string; retry_after_s?: number };
@@ -981,6 +988,11 @@ export interface RunnerReceipt {
    */
   terminal: "uploaded" | "failed" | "accepted" | "released";
   committed_at: RunnerTimestamp;
+  /**
+   * A `failed` receipt only: the reason code the server stored on the run's failure,
+   * such as `case_failures` when an earlier batch of the run failed a case.
+   */
+  failure_reason?: EvalRunFailureReasonCode;
 }
 
 /** Upload and fail are mutually exclusive: the loser gets `409 work_terminal` (`RunnerWorkTerminalErrorBody`). */

@@ -8,6 +8,7 @@ import {
 import { isRecord } from "./parsing";
 import { parseStoredRejectionReason, storedRejectionReason, type RejectionReason } from "./rejection-reason";
 import type { SpendBoundStop } from "./spend-bound";
+import type { TimeBoundStop } from "./time-bound";
 
 export const EVAL_CASE_FAILURE_STAGES = ["model_call", "judge", "scorer", "harness"] as const;
 export type EvalCaseFailureStage = (typeof EVAL_CASE_FAILURE_STAGES)[number];
@@ -110,6 +111,13 @@ export const EVAL_RUN_FAILURE_REASON_CODES = [
   "setup_failed"
 ] as const;
 export type EvalRunFailureReasonCode = (typeof EVAL_RUN_FAILURE_REASON_CODES)[number];
+
+/**
+ * EVAL-012: the failed step of an `upload_rejected` failure whose evidence failed
+ * BenchRouter's own call ledger check (`EvalCallLedgerUnverifiedError`), not a
+ * fault of the upload, the eval or the model.
+ */
+export const EVIDENCE_UNVERIFIED_FAILED_STEP = "evidence_unverified";
 
 export const EVAL_RUN_FAILURE_SOURCES = [
   "workflow_fail_step",
@@ -269,6 +277,12 @@ export interface EvalRunFailureDiagnostic {
    * Server-written only, from the run row (`prepareModelRunFailure`).
    */
   spend_bound?: SpendBoundStop;
+  /**
+   * EVAL-011: the times of a retry chain stopped at its time bound.
+   * Server-written only, from the run row (`prepareModelRunFailure`) or by the
+   * boundary that ends the chain before a retry that would not fit.
+   */
+  time_bound?: TimeBoundStop;
 }
 
 export type ParseFailureDiagnosticResult =
@@ -427,7 +441,7 @@ function parseDiagnostic<Value>(value: Value, stored: boolean): ParseFailureDiag
   const allowed = new Set([
     "v", "source", "reason_code", "failed_step", "github_conclusion", "cases",
     "execution",
-    ...(stored ? ["verification", "diagnostic_rejected", "retry", "runtime_reason", "spend_bound"] : [])
+    ...(stored ? ["verification", "diagnostic_rejected", "retry", "runtime_reason", "spend_bound", "time_bound"] : [])
   ]);
   const unknown = unknownKey(value, allowed);
   if (unknown) return invalid(`Failure diagnostic ${unknown} is not allowed`);
@@ -478,8 +492,24 @@ function parseDiagnostic<Value>(value: Value, stored: boolean): ParseFailureDiag
     // EVAL-012: display detail only; an unreadable one is dropped the same way.
     const spendBound = parseSpendBoundStop(value.spend_bound);
     if (spendBound !== null) result.spend_bound = spendBound;
+    // EVAL-011: display detail only; an unreadable one is dropped the same way.
+    const timeBound = parseTimeBoundStop(value.time_bound);
+    if (timeBound !== null) result.time_bound = timeBound;
   }
   return { ok: true, value: result };
+}
+
+/** EVAL-011: a stored time-bound stop, or null when it is absent or unreadable. */
+export function parseTimeBoundStop<Value>(value: Value): TimeBoundStop | null {
+  if (!isRecord(value) || unknownKey(value, new Set(["used_s", "bound_s", "reference_s", "next_wait_s"]))) return null;
+  const times = [value.used_s, value.bound_s, value.reference_s];
+  if (!times.every((time) => isJsonFiniteNumber(time) && time >= 0)) return null;
+  const stop: TimeBoundStop = { used_s: Number(value.used_s), bound_s: Number(value.bound_s), reference_s: Number(value.reference_s) };
+  if (value.next_wait_s !== undefined) {
+    if (!isJsonFiniteNumber(value.next_wait_s) || value.next_wait_s < 0) return null;
+    stop.next_wait_s = Number(value.next_wait_s);
+  }
+  return stop;
 }
 
 function parseSpendBoundStop<Value>(value: Value): SpendBoundStop | null {
