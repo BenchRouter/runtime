@@ -49,6 +49,12 @@ export async function routeContract(treeRoot: string, route: ManifestRoute, repo
     case_count: cases.length,
     request_features: planningRequirements(cases)
   };
+  // Repeat copies carry `repeat_of`; the critical-share warning counts authored cases only.
+  const authored = cases.filter((testCase) => testCase.raw.repeat_of === undefined);
+  if (authored.length > 0) {
+    contract.authored_case_count = authored.length;
+    contract.critical_case_count = authored.filter((testCase) => testCase.critical).length;
+  }
   if (reportCaseIndex && cases.length > 0 && cases.every((testCase) => isRunnerBatchCaseId(testCase.id))) {
     contract.case_index = cases.map((testCase) => ({ case_id: testCase.id, case_version: testCase.version }));
   }

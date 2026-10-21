@@ -652,6 +652,12 @@ export interface RunnerRouteContract {
   env_names: string[];
   case_count: number;
   /**
+   * Authored replay cases (repeats not expanded) and how many are marked `critical`.
+   * Replay routes only. Counts only; the server warns when most are critical (EVAL-006).
+   */
+  authored_case_count?: number;
+  critical_case_count?: number;
+  /**
    * `case_subset`: the route's cases in the runtime's order, repeats expanded.
    * Replay routes only, and only when hello listed `case_index`. Its length is
    * `case_count`. IDs and versions only; raw cases are never sent.

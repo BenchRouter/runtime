@@ -114,7 +114,10 @@ export const EVAL_RUN_FAILURE_REASON_CODES = [
   "work_exceeds_job_window",
   // RUN-001 §3.3.1: the job failed in setup before any model call, so the server
   // stopped the whole result set (`src/runner/setup-stop.ts`). Server-written only.
-  "setup_failed"
+  "setup_failed",
+  // EVAL-011 / RUN-001: more than half of the run's cases failed at the model's provider, so the
+  // run measured an outage, not the model. Server-written only; the run is unmeasured and retried.
+  "provider_outage"
 ] as const;
 export type EvalRunFailureReasonCode = (typeof EVAL_RUN_FAILURE_REASON_CODES)[number];
 
@@ -332,6 +335,17 @@ export interface EvalRunFailureDiagnostic {
    * boundary that ends the chain before a retry that would not fit.
    */
   time_bound?: TimeBoundStop;
+  /**
+   * EVAL-011: the provider failures of a `provider_outage` run: how many of its planned
+   * cases failed at the provider, and the most common cause. Server-written only.
+   */
+  provider_outage?: ProviderOutageStop;
+}
+
+export interface ProviderOutageStop {
+  failed: number;
+  planned: number;
+  cause: EvalProviderFailureCode;
 }
 
 export type ParseFailureDiagnosticResult =
@@ -490,13 +504,15 @@ function parseDiagnostic<Value>(value: Value, stored: boolean): ParseFailureDiag
   const allowed = new Set([
     "v", "source", "reason_code", "failed_step", "github_conclusion", "cases",
     "execution",
-    ...(stored ? ["verification", "diagnostic_rejected", "retry", "runtime_reason", "spend_bound", "time_bound"] : [])
+    ...(stored ? ["verification", "diagnostic_rejected", "retry", "runtime_reason", "spend_bound", "time_bound", "provider_outage"] : [])
   ]);
   const unknown = unknownKey(value, allowed);
   if (unknown) return invalid(`Failure diagnostic ${unknown} is not allowed`);
   if (value.v !== 1) return invalid("Failure diagnostic v must be 1");
   if (!member(EVAL_RUN_FAILURE_SOURCES, value.source)) return invalid("Failure diagnostic source is invalid");
   if (!member(EVAL_RUN_FAILURE_REASON_CODES, value.reason_code)) return invalid("Failure diagnostic reason_code is invalid");
+  // An upload never reports an outage: the server decides it from the stored case results.
+  if (!stored && value.reason_code === "provider_outage") return invalid("Failure diagnostic reason_code is invalid");
   const failedStep = nullableText(value.failed_step, MAX_SMALL, true);
   if (!failedStep.ok) return invalid("Failure diagnostic failed_step is invalid");
   const conclusion = nullableText(value.github_conclusion, MAX_SMALL, true);
@@ -544,8 +560,18 @@ function parseDiagnostic<Value>(value: Value, stored: boolean): ParseFailureDiag
     // EVAL-011: display detail only; an unreadable one is dropped the same way.
     const timeBound = parseTimeBoundStop(value.time_bound);
     if (timeBound !== null) result.time_bound = timeBound;
+    const outage = parseProviderOutageStop(value.provider_outage);
+    if (outage !== null) result.provider_outage = outage;
   }
   return { ok: true, value: result };
+}
+
+/** EVAL-011: a stored provider outage, or null when it is absent or unreadable (display detail only). */
+function parseProviderOutageStop<Value>(value: Value): ProviderOutageStop | null {
+  if (!isRecord(value) || unknownKey(value, new Set(["failed", "planned", "cause"]))) return null;
+  if (!isJsonFiniteNumber(value.failed) || !isJsonFiniteNumber(value.planned) || value.failed < 0 || value.planned < value.failed) return null;
+  if (!isJsonString(value.cause) || !isProviderFailureCode(value.cause)) return null;
+  return { failed: Number(value.failed), planned: Number(value.planned), cause: value.cause };
 }
 
 /** EVAL-011: a stored time-bound stop, or null when it is absent or unreadable. */
