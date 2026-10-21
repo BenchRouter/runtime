@@ -69,13 +69,18 @@ export type EvalCaseOutcomeCode = (typeof EVAL_CASE_OUTCOME_CODES)[number];
  * - `workflow_missing`: GitHub answered the workflow dispatch with 404.
  * - `installation_revoked`: GitHub answered the dispatch with 401 or 403, or
  *   the repository has no active GitHub App installation.
+ * - `startup_failing`: the set's route context is startup-blocked (RUN-001 R5,
+ *   `src/runner/startup-failures.ts`). It is a context block, kept in
+ *   `runner_startup_failures`, so it is never written to `routes.eval_blocked_code`.
  */
 export const REPOSITORY_BLOCK_CODES = [
   "untrusted_repository_eval_context",
   "workflow_missing",
   "installation_revoked",
   // EVAL-015: the route harness breaker (src/evals/route-harness-breaker.ts).
-  "harness_failing"
+  "harness_failing",
+  // RUN-001 R5: refusal of a set whose route context is startup-blocked.
+  "startup_failing"
 ] as const;
 export type RepositoryBlockCode = (typeof REPOSITORY_BLOCK_CODES)[number];
 

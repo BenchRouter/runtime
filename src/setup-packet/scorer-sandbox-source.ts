@@ -111,6 +111,15 @@ export const SANDBOX_MEMBRANE_SOURCE = [
   "  if (judgeWrapper) { if (!data.metadata) data.metadata = {}; data.metadata.judge = judgeWrapper; }",
   "  if (typeof globalThis.__benchrouter_scorer !== 'function') { throw new Error('scorer score() missing'); }",
   "  var result = await globalThis.__benchrouter_scorer(data);",
+  // A scorer returns { pass, score?, checks, reasons }. `score` is the graded quality in [0, 1].
+  "  var hasScore = !!result && typeof result === 'object' && result.score !== undefined;",
+  "  if (hasScore && (typeof result.score !== 'number' || !isFinite(result.score) || result.score < 0 || result.score > 1)) {",
+  "    throw new Error('scorer result.score must be a finite number from 0 to 1');",
+  "  }",
+  "  if (result && typeof result === 'object' && !Array.isArray(result)) {",
+  "    var ignoredKeys = Object.keys(result).filter(function (key) { return key !== 'pass' && key !== 'score' && key !== 'checks' && key !== 'reasons'; });",
+  "    if (ignoredKeys.length > 0) { try { console.warn('scorer result keys ignored: ' + ignoredKeys.join(', ') + ' (only pass, score, checks, reasons are read)'); } catch (warnErr) {} }",
+  "  }",
   "  var checks = result && Array.isArray(result.checks) ? result.checks : [];",
   "  for (var checkIndex = 0; checkIndex < checks.length; checkIndex++) {",
   "    var check = checks[checkIndex];",
@@ -126,6 +135,8 @@ export const SANDBOX_MEMBRANE_SOURCE = [
   "    if (typeof check.code_ref !== 'string' || check.code_ref.trim().length === 0) { throw new Error('scorer result.checks[' + checkIndex + '].code_ref must be a non-empty string'); }",
   "  }",
   "  var reasons = result && Array.isArray(result.reasons) ? result.reasons.map(String) : [];",
-  "  return JSON.stringify({ pass: !!(result && result.pass === true), checks: checks, reasons: reasons });",
+  "  var verdict = { pass: !!(result && result.pass === true), checks: checks, reasons: reasons };",
+  "  if (hasScore) { verdict.score = result.score; }",
+  "  return JSON.stringify(verdict);",
   "};"
 ].join("\n");

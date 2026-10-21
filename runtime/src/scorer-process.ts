@@ -7,7 +7,7 @@
 import type { ChildProcess } from "node:child_process";
 import { parseJsonValueFromString } from "../../src/shared/json-parse-contracts";
 import { childEnv, type ControlContext } from "./control";
-import { isJsonBoolean, isJsonObject, isJsonString, parseJsonText, type JsonValue } from "./json";
+import { isJsonBoolean, isJsonFiniteNumber, isJsonObject, isJsonString, parseJsonText, type JsonValue } from "./json";
 import { killGroup, spawnGroup } from "./processes";
 import type { ScorerHostReply, ScorerHostRequest } from "./scorer-host";
 
@@ -17,6 +17,8 @@ export const SCORE_COMPUTE_DEADLINE_MS = 20_000;
 
 export interface ScorerVerdict {
   pass: boolean;
+  /** The scorer's graded quality in [0, 1]; null when the scorer returned none (EVAL-002). */
+  score: number | null;
   checks: JsonValue[];
   reasons: string[];
 }
@@ -63,7 +65,8 @@ function verdictOf(resultJson: string): ScorerVerdict {
   const result = isJsonObject(parsed) ? parsed : {};
   const checks = Array.isArray(result.checks) ? result.checks : [];
   const reasons = Array.isArray(result.reasons) ? result.reasons.filter(isJsonString) : [];
-  return { pass: isJsonBoolean(result.pass) && result.pass, checks, reasons };
+  const score = result.score !== undefined && isJsonFiniteNumber(result.score) && result.score >= 0 && result.score <= 1 ? result.score : null;
+  return { pass: isJsonBoolean(result.pass) && result.pass, score, checks, reasons };
 }
 
 function printable(value: JsonValue): string {

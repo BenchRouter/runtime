@@ -311,7 +311,8 @@ async function runCase(env: ItemEnvironment, scorer: ScorerProcess, testCase: Re
     }
     row.pass = scored.verdict.pass;
     checks = metricsChecks(scored.verdict.checks);
-    row.score = row.pass ? 1 : 0;
+    // EVAL-002: the scorer's graded score when it returns one, else pass as 0 or 1.
+    row.score = scored.verdict.score ?? (row.pass ? 1 : 0);
     if (!row.pass && judgeFailure) {
       // EVAL-011: the scorer turned a failed judge call into a rejection; the candidate was never judged.
       throw judgeFailure;
