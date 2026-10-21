@@ -148,8 +148,12 @@ export function parseRunnerWorkMode(value: JsonValue): RunnerWorkMode | null {
  * replay request body (`buildReplayBody`) or the scorer host's semantics change.
  * A case result is carried only between runs of the same revision. A runtime
  * that declares none produces runs that are never carry sources or targets.
+ * The first entry is the current revision. An older entry stays only so the server can deploy
+ * before the pointer moves to the release that declares the new one; drop it once the pointer
+ * has moved and every job and session of the older release has finished (a live session
+ * with an unknown feature cannot claim).
  */
-export const RUNNER_REPLAY_SEMANTICS_FEATURES = ["replay_semantics_1"] as const;
+export const RUNNER_REPLAY_SEMANTICS_FEATURES = ["replay_semantics_2", "replay_semantics_1"] as const;
 export type RunnerReplaySemanticsFeature = (typeof RUNNER_REPLAY_SEMANTICS_FEATURES)[number];
 
 /**
