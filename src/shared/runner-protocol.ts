@@ -153,7 +153,7 @@ export function parseRunnerWorkMode(value: JsonValue): RunnerWorkMode | null {
  * has moved and every job and session of the older release has finished (a live session
  * with an unknown feature cannot claim).
  */
-export const RUNNER_REPLAY_SEMANTICS_FEATURES = ["replay_semantics_2", "replay_semantics_1"] as const;
+export const RUNNER_REPLAY_SEMANTICS_FEATURES = ["replay_semantics_3", "replay_semantics_2", "replay_semantics_1"] as const;
 export type RunnerReplaySemanticsFeature = (typeof RUNNER_REPLAY_SEMANTICS_FEATURES)[number];
 
 /**
@@ -706,7 +706,7 @@ export type RunnerSnapshotRequest =
  * (`descends: false`, `is_head: true`).
  */
 export type RunnerSnapshotResponse =
-  | { outcome: "imported"; snapshot_id: string; contract_digests: Record<string, Sha256Digest>; history_rewritten: boolean }
+  | { outcome: "imported"; snapshot_id: string; contract_digests: Record<string, Sha256Digest>; history_rewritten: boolean; warnings?: string[] }
   | RunnerDoneOutcome
   | RunnerBlockedOutcome
   | RunnerAwaitingSnapshotOutcome;

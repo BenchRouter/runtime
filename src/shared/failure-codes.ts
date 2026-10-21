@@ -1,4 +1,5 @@
 import {
+  isJsonBoolean,
   isJsonFiniteNumber,
   isJsonString,
   parseJsonValueFromString,
@@ -185,6 +186,11 @@ export interface EvalFailedCaseDiagnostic {
   model_call_id: string | null;
   latency_ms: number | null;
   /**
+   * EVAL-011: whether the failed case is critical, as the runtime read it from the
+   * case. The server needs it to score a provider failure as a failed case.
+   */
+  critical?: boolean;
+  /**
    * SERVE-004 / DATA-001: why the upstream rejected this case's model request.
    * The server adds it from its own call rows (`withRejectionReasons`); an
    * upload cannot set it. It never changes how a failure is classified.
@@ -221,8 +227,46 @@ export const EVAL_CASE_OUTCOME_ERROR = {
 } as const satisfies Record<EvalCaseOutcomeCode, string>;
 export const EVAL_CASE_FAILED_ERROR = "The case reported a failure.";
 
-export function storedCaseError(error: string | null | undefined, outcomeCode: EvalCaseOutcomeCode | null | undefined): string | null {
-  if (outcomeCode) return EVAL_CASE_OUTCOME_ERROR[outcomeCode];
+/**
+ * EVAL-011 / RUN-001: the outcome codes of a case whose model call failed at its
+ * provider. The server writes them, for the failed case it scores (pass false,
+ * score 0); the cause shows the owner why the case failed. They are not output
+ * facts, so their stored error is the neutral fixed text and the owner reads
+ * `EVAL_PROVIDER_FAILURE_TEXT`.
+ */
+export const EVAL_PROVIDER_FAILURE_CODES = [
+  "provider_timeout",
+  "provider_rate_limited",
+  "provider_rejected",
+  "provider_unavailable",
+  "provider_error"
+] as const;
+export type EvalProviderFailureCode = (typeof EVAL_PROVIDER_FAILURE_CODES)[number];
+export type EvalStoredOutcomeCode = EvalCaseOutcomeCode | EvalProviderFailureCode;
+
+export const EVAL_PROVIDER_FAILURE_TEXT = {
+  provider_timeout: "timed out at provider",
+  provider_rate_limited: "rate limited by provider",
+  provider_rejected: "request rejected by provider",
+  provider_unavailable: "model unavailable at provider",
+  provider_error: "failed at provider"
+} as const satisfies Record<EvalProviderFailureCode, string>;
+
+export function isProviderFailureCode(code: string | null | undefined): code is EvalProviderFailureCode {
+  return EVAL_PROVIDER_FAILURE_CODES.some((known) => known === code);
+}
+
+/** EVAL-011: the provider outcome code that names why one failed model call failed. */
+export function providerFailureCode(failure: EvalFailedCaseDiagnostic): EvalProviderFailureCode {
+  if (failure.error_code === "upstream_timeout" || failure.cause_code === "upstream_timeout") return "provider_timeout";
+  if (failure.cause_code === "upstream_rate_limited" || failure.cause_code === "429") return "provider_rate_limited";
+  if (failure.cause_code === "upstream_request_rejected") return "provider_rejected";
+  if (failure.cause_code === "model_unavailable" || failure.cause_code === "target_temporarily_unroutable") return "provider_unavailable";
+  return "provider_error";
+}
+
+export function storedCaseError(error: string | null | undefined, outcomeCode: EvalStoredOutcomeCode | null | undefined): string | null {
+  if (outcomeCode && !isProviderFailureCode(outcomeCode)) return EVAL_CASE_OUTCOME_ERROR[outcomeCode];
   return error === undefined || error === null ? null : EVAL_CASE_FAILED_ERROR;
 }
 
@@ -650,7 +694,7 @@ function parseFailed<Value>(
 ): { ok: true; value: EvalFailedCaseDiagnostic } | FailureDiagnosticInvalid {
   if (!isRecord(value)) return invalid("Failure diagnostic failed case must be an object");
   const unknown = unknownKey(value, new Set([
-    "case_id", "stage", "error_code", "cause_code", "cause_name", "message", "model_call_id", "latency_ms",
+    "case_id", "stage", "error_code", "cause_code", "cause_name", "message", "model_call_id", "latency_ms", "critical",
     // Server-written only: an upload that carries it is refused as an unknown key.
     ...(stored ? ["rejection"] : [])
   ]));
@@ -678,6 +722,8 @@ function parseFailed<Value>(
   ) {
     return invalid("Failure diagnostic latency_ms is invalid");
   }
+  const critical = value.critical;
+  if (critical !== undefined && !isJsonBoolean(critical)) return invalid("Failure diagnostic critical is invalid");
   const failed: EvalFailedCaseDiagnostic = {
     case_id: caseId,
     stage,
@@ -689,6 +735,7 @@ function parseFailed<Value>(
     model_call_id: modelCallId,
     latency_ms: latencyMs
   };
+  if (critical !== undefined) failed.critical = critical;
   // A stored reason outside the vocabulary is dropped. It never makes the
   // diagnostic unreadable, so it cannot change a retry classification.
   const rejection = stored ? parseStoredRejectionReason(value.rejection) : null;

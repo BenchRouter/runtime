@@ -345,7 +345,8 @@ async function runCase(env: ItemEnvironment, scorer: ScorerProcess, testCase: Re
       cause_code: failure.stage === "scorer" ? null : safeCode(failure.causeCode ?? undefined),
       cause_name: safeCode(failure.causeName ?? undefined),
       model_call_id: row.model_call_ids[0] ?? null,
-      latency_ms: row.latency_ms
+      latency_ms: row.latency_ms,
+      critical: testCase.critical
     }
   };
 }
@@ -381,7 +382,8 @@ function caseFailureDiagnostic(results: CaseResult[], failed: EvalFailedCaseDiag
         cause_code: entry.cause_code,
         cause_name: entry.cause_name,
         model_call_id: entry.model_call_id,
-        latency_ms: entry.latency_ms
+        latency_ms: entry.latency_ms,
+        critical: entry.critical === true
       }))
     }
   };
@@ -413,11 +415,10 @@ function usageCost(parsed: JsonObject): number | null {
  * release's `replay_semantics_<n>` feature (runtime/package.json and
  * RUNNER_REPLAY_SEMANTICS_FEATURES), so no case result carries across it.
  */
-function buildReplayBody(testCase: ReplayCase, routeId: string): JsonObject {
+export function buildReplayBody(testCase: ReplayCase, routeId: string): JsonObject {
   const body: JsonObject = { ...testCase.body, model: routeId };
   delete body.stream;
   delete body.stream_options;
-  if (body.temperature === undefined) body.temperature = 0;
   return body;
 }
 
