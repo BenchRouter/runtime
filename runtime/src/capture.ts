@@ -267,7 +267,8 @@ class CaptureStore {
       cases.set(id, {
         id,
         route: entry.route,
-        critical: true,
+        // EVAL-006: a captured case is not must-not-regress until the customer marks it so.
+        critical: false,
         // The exact captured request body and endpoint, replayed verbatim.
         input: entry.input,
         routing_context: entry.routing,
