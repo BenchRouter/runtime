@@ -310,6 +310,7 @@ async function prepare(control: ControlContext, client: RunnerClient, hello: Run
     return null;
   }
   if (snapshot.history_rewritten) summary.note("the default branch history was rewritten; BenchRouter imported this push by the ancestry reset rule");
+  for (const warning of snapshot.warnings ?? []) summary.note(`warning: ${warning}`);
   summary.note(`snapshot ${snapshot.snapshot_id} imported for ${routes.length} route(s)`);
   const prepared = new Map<Sha256Digest, PreparedRoute>();
   for (const [routeKey, digest] of Object.entries(snapshot.contract_digests)) {
@@ -550,7 +551,8 @@ async function commit(control: ControlContext, client: RunnerClient, item: Runne
         request.case_ids = batch.caseIds;
         request.case_failures = failures.map((failure): JsonObject => ({
           case_id: failure.case_id, stage: failure.stage, error_code: failure.error_code, cause_code: failure.cause_code,
-          cause_name: failure.cause_name, model_call_id: failure.model_call_id, latency_ms: failure.latency_ms
+          cause_name: failure.cause_name, model_call_id: failure.model_call_id, latency_ms: failure.latency_ms,
+          critical: failure.critical === true
         }));
       }
       const committed = await client.upload(request);

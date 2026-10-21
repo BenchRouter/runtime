@@ -292,12 +292,14 @@ export class RunnerClient {
     const digests = objectOf(body.contract_digests, "snapshot.contract_digests");
     const contractDigests: Record<string, `sha256:${string}`> = {};
     for (const key of Object.keys(digests)) contractDigests[key] = readDigest(digests, key, "snapshot.contract_digests");
-    return {
+    const imported: RunnerSnapshotResponse = {
       outcome,
       snapshot_id: readString(body, "snapshot_id", "snapshot"),
       contract_digests: contractDigests,
       history_rewritten: readBoolean(body, "history_rewritten", "snapshot")
     };
+    if (body.warnings !== undefined) imported.warnings = readStringList(body, "warnings", "snapshot");
+    return imported;
   }
 
   async ready(request: RunnerReadyRequest): Promise<RunnerReadyResponse> {
