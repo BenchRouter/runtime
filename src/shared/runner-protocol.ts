@@ -152,9 +152,11 @@ export function parseRunnerWorkMode(value: JsonValue): RunnerWorkMode | null {
  * The first entry is the current revision. An older entry stays only so the server can deploy
  * before the pointer moves to the release that declares the new one; drop it once the pointer
  * has moved and every job and session of the older release has finished (a live session
- * with an unknown feature cannot claim).
+ * with an unknown feature cannot claim). Revisions 1 and 2 were dropped on 2026-10-21, so no
+ * runtime that defaults an omitted temperature to 0 replays a case again; a replay claim also
+ * requires a declared revision (EVAL-003 request identity, `src/evals/replay-request-identity.ts`).
  */
-export const RUNNER_REPLAY_SEMANTICS_FEATURES = ["replay_semantics_3", "replay_semantics_2", "replay_semantics_1"] as const;
+export const RUNNER_REPLAY_SEMANTICS_FEATURES = ["replay_semantics_3"] as const;
 export type RunnerReplaySemanticsFeature = (typeof RUNNER_REPLAY_SEMANTICS_FEATURES)[number];
 
 /**

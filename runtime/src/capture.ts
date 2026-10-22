@@ -12,11 +12,12 @@ import { readManifest } from "./manifest";
 import { parseJsonValueFromString } from "../../src/shared/json-parse-contracts";
 import type { StringMap } from "./transport";
 
-const REDACTED = "[[benchrouter:redacted]]";
+export const REDACTED = "[[benchrouter:redacted]]";
 
 // Secret prefixes redacted on sight, structure preserved. NOT exhaustive: the install
-// agent reviews every redaction and flags anything unsafe to retain.
-const SECRET_PREFIXES = [
+// agent reviews every redaction and flags anything unsafe to retain. The evaluator's
+// stderr excerpt (stderr-excerpt.ts) redacts the same prefixes.
+export const SECRET_PREFIXES = [
   "sk-", "sk-ant-", "br_", "ghp_", "gho_", "ghs_", "github_pat_",
   "xoxb-", "xoxp-", "xoxa-", "AKIA", "ASIA", "AIza", "ya29.", "Bearer "
 ];
@@ -81,7 +82,7 @@ function truthy(value: JsonValue | undefined): boolean {
   return value !== undefined && value !== null && value !== false && value !== 0 && value !== "";
 }
 
-function looksLikeSecret(text: string): boolean {
+export function looksLikeSecret(text: string): boolean {
   return SECRET_PREFIXES.some((prefix) => text.startsWith(prefix) && text.length >= prefix.length + 8);
 }
 

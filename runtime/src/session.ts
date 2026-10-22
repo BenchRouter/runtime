@@ -29,6 +29,7 @@ import type { ControlContext } from "./control";
 import { ancestryProof, fetchEvalTree } from "./eval-tree";
 import { runExecutableItem } from "./executable";
 import { canonicalJson, errorMessage, objectOf, parseJsonText, ProtocolError, readString, sha256Digest, sleep, type JsonObject } from "./json";
+import { isJsonString } from "../../src/shared/json-parse-contracts";
 import { readManifest, type ManifestRoute } from "./manifest";
 import { killAllGroups } from "./processes";
 import { ItemFault, runReplayItem, type ItemOutcome } from "./replay";
@@ -584,8 +585,16 @@ async function commit(control: ControlContext, client: RunnerClient, item: Runne
       cause: outcome.cause, diagnostics: outcome.diagnostics
     };
     if (batchIds !== null) failure.case_ids = batchIds;
-    await client.fail(failure);
+    const committed = await client.fail(failure);
+    // RUN-001 §3.3.1: `setup_failed` is the server's proof that no model call of the item
+    // reached it, so the job names the setup error first and blames no model.
+    if (committed.receipt.failure_reason === "setup_failed") {
+      const message = outcome.diagnostics.message;
+      summary.setupFailed(item.work_id, outcome.cause, item.model_run.model, isJsonString(message) && message.length > 0 ? message : outcome.cause, outcome.evaluatorError);
+      return "failed";
+    }
     summary.failed(item.work_id, outcome.cause, failureClass(outcome.cause, outcome.providerOnly), item.model_run.model);
+    if (outcome.evaluatorError) summary.evaluatorError(item.work_id, outcome.evaluatorError);
     return "failed";
   } catch (error) {
     if (error instanceof RunnerApiError && error.code === "work_terminal" && error.receipt) {

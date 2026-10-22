@@ -36,6 +36,7 @@ import {
 import { ScorerProcess, type JudgeBridge } from "./scorer-process";
 import { send, TransportError, type HttpReply, type TargetHolds } from "./transport";
 import { metricsChecks, type ReplayMetrics } from "./metrics";
+import type { EvaluatorErrorExcerpt } from "./stderr-excerpt";
 
 /** The Worker bounds each provider attempt; this slightly wider client deadline catches a lost response. */
 const MODEL_ATTEMPT_TIMEOUT_MS = 135_000;
@@ -114,7 +115,11 @@ export interface BatchOutcome {
 
 export type ItemOutcome =
   | { kind: "upload"; rows: UploadRow[]; quality: JsonObject | null; metrics?: ReplayMetrics[]; batch?: BatchOutcome; evaluatorRuntime?: RunnerEvaluatorRuntime | null }
-  | { kind: "fail"; cause: RunnerWorkFailCause; diagnostics: JsonObject; providerOnly: boolean; metrics?: ReplayMetrics[] };
+  | {
+    kind: "fail"; cause: RunnerWorkFailCause; diagnostics: JsonObject; providerOnly: boolean; metrics?: ReplayMetrics[];
+    /** RUN-001 §3.11: a failed evaluator's scrubbed stderr excerpt, for the job summary only; never sent (DATA-001). */
+    evaluatorError?: EvaluatorErrorExcerpt;
+  };
 
 function encodeCallHeader(header: RunnerEvalCallHeader): string {
   return Buffer.from(canonicalJson(header), "utf8").toString("base64url");

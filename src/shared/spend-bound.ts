@@ -35,7 +35,10 @@ function usd(value: number): string {
   return `$${value < 0.01 && value > 0 ? value.toFixed(4) : value.toFixed(2)}`;
 }
 
-/** EVAL-012: the plain reason shown for a run stopped at its spend bound. */
+/**
+ * EVAL-012: the plain reason shown for a run stopped at its spend bound. The comparison model is the
+ * baseline, or a baseline-floor member while the baseline cannot be measured (EVAL-004).
+ */
 export function spendBoundStopCopy(stop: SpendBoundStop): string {
-  return `Stopped at ${usd(stop.spent_usd)}: ${SPEND_BOUND_MULTIPLIER}× the baseline's ${usd(stop.reference_usd)} for this eval. Check the eval code for a loop.`;
+  return `Stopped at ${usd(stop.spent_usd)}: ${SPEND_BOUND_MULTIPLIER}× the comparison model's ${usd(stop.reference_usd)} for this eval. Check the eval code for a loop.`;
 }

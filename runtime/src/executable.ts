@@ -30,6 +30,7 @@ import { killGroup, spawnGroup } from "./processes";
 import type { ItemOutcome, UploadRow } from "./replay";
 import { ItemFault } from "./replay";
 import { hashDeclaredFiles, sameHashes } from "./snapshot";
+import { BoundedCapture, buildExcerpt } from "./stderr-excerpt";
 import type { StringMap } from "./transport";
 
 /** §7.3 decision 1: the names the install child sees the registry grant under. */
@@ -55,8 +56,15 @@ interface ProcessOutcome {
   stdout: string;
 }
 
-/** Run argv as a process group until it exits, the deadline passes, or the item aborts. */
-function runGroup(argv: string[], cwd: string, env: StringMap, deadlineAt: number, signal: AbortSignal, captureStdout = false): Promise<ProcessOutcome> {
+/** How long a finished evaluator's stderr may stay open (a grandchild holding it) before the excerpt is built. */
+const STDERR_DRAIN_MS = 2_000;
+
+/**
+ * Run argv as a process group until it exits, the deadline passes, or the item aborts.
+ * With `stderr`, the child's stderr is piped: every chunk goes on to this process's
+ * stderr unchanged, so the job log stays the same, and a bounded copy is kept.
+ */
+function runGroup(argv: string[], cwd: string, env: StringMap, deadlineAt: number, signal: AbortSignal, captureStdout = false, stderr: BoundedCapture | null = null): Promise<ProcessOutcome> {
   return new Promise((resolve) => {
     const [command, ...args] = argv;
     // An abort that landed before the spawn (a fence during install or hashing) starts nothing.
@@ -66,13 +74,21 @@ function runGroup(argv: string[], cwd: string, env: StringMap, deadlineAt: numbe
     }
     let child: ChildProcess;
     try {
-      child = spawnGroup(command, args, { cwd, env, stdio: ["ignore", captureStdout ? "pipe" : "inherit", "inherit"] });
+      child = spawnGroup(command, args, { cwd, env, stdio: ["ignore", captureStdout ? "pipe" : "inherit", stderr === null ? "inherit" : "pipe"] });
     } catch {
       resolve({ exitCode: null, signal: null, timedOut: false, startFailed: true, stdout: "" });
       return;
     }
     let stdout = "";
     child.stdout?.on("data", (chunk: Buffer) => { if (stdout.length < 4096) stdout += chunk.toString("utf8"); });
+    let stderrEnded = child.stderr === null;
+    const stderrDone: Promise<void> = child.stderr === null ? Promise.resolve() : new Promise((done) => {
+      child.stderr?.on("data", (chunk: Buffer) => {
+        process.stderr.write(chunk);
+        stderr?.push(chunk);
+      });
+      child.stderr?.once("close", () => { stderrEnded = true; done(); });
+    });
     let timedOut = false;
     const stop = () => { void killGroup(child); };
     const timer = setTimeout(() => { timedOut = true; stop(); }, Math.max(0, deadlineAt - Date.now()));
@@ -86,9 +102,24 @@ function runGroup(argv: string[], cwd: string, env: StringMap, deadlineAt: numbe
     child.once("exit", (code, exitSignal) => {
       // A grandchild the evaluator left behind never outlives the item.
       void killGroup(child);
-      finish({ exitCode: code, signal: exitSignal, timedOut, startFailed: false, stdout });
+      const outcome: ProcessOutcome = { exitCode: code, signal: exitSignal, timedOut, startFailed: false, stdout };
+      if (stderrEnded) {
+        finish(outcome);
+        return;
+      }
+      // The last stderr chunks can arrive after `exit`; wait for them, but never for long.
+      const drain = setTimeout(() => finish(outcome), STDERR_DRAIN_MS);
+      void stderrDone.then(() => { clearTimeout(drain); finish(outcome); });
     });
   });
+}
+
+/** How the evaluator ended, for the job summary. */
+function endingText(outcome: ProcessOutcome): string {
+  if (outcome.startFailed) return "could not start";
+  if (outcome.timedOut) return "ran past its time limit";
+  if (outcome.signal !== null) return `was ended by signal ${outcome.signal}`;
+  return `exited with code ${outcome.exitCode ?? "unknown"}`;
 }
 
 function executionDiagnostic(outcome: ProcessOutcome): JsonObject {
@@ -205,11 +236,18 @@ export async function runExecutableItem(env: ExecutableEnvironment): Promise<Ite
   await rm(path.join(treeRoot, executable.resultPath), { force: true });
   const timeoutAt = Math.min(workDeadlineAt, Date.now() + executable.timeoutMinutes * 60_000);
   const evaluatorArgv = [launcherBinary, ...executable.argv.slice(1)];
-  const run = await runGroup(evaluatorArgv, workDir, evaluatorEnv, timeoutAt, signal);
+  // The call token never shows in the job log, whatever the evaluator prints.
+  console.log(`::add-mask::${item.call_token}`);
+  const stderr = new BoundedCapture();
+  const run = await runGroup(evaluatorArgv, workDir, evaluatorEnv, timeoutAt, signal, false, stderr);
   if (signal.aborted) throw abortFault(signal);
   if (run.timedOut && timeoutAt >= workDeadlineAt) throw new ItemFault("deadline_exceeded", "the evaluator ran past the work deadline");
   if (run.startFailed || run.timedOut || run.signal !== null || run.exitCode !== 0) {
-    return { kind: "fail", cause: "harness_failed", diagnostics: executionDiagnostic(run), providerOnly: false };
+    // RUN-001 §3.11 / DATA-001: the excerpt stays in the job summary and annotations; it is
+    // never part of `diagnostics` or any other request body.
+    const secrets = [item.call_token, ...executable.secretEnv.map((name) => evaluatorEnv[name] ?? ""), control.installNpmToken ?? ""];
+    const evaluatorError = buildExcerpt(stderr, secrets, endingText(run));
+    return { kind: "fail", cause: "harness_failed", diagnostics: executionDiagnostic(run), providerOnly: false, evaluatorError };
   }
 
   // 4. The result receipt.

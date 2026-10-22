@@ -366,7 +366,48 @@ export interface EvalRunFailureDiagnostic {
    * cases it could not answer, and the most common cause code. Server-written only.
    */
   platform_failure?: PlatformFailureStop;
+  /**
+   * EVAL-011: the model refused the route's request contract and the customer evaluator
+   * stopped on that refusal. The model owns the failure, not the evaluator. Server-written
+   * only, from the run's recorded refusal (`prepareModelRunFailure`).
+   */
+  model_refusal?: ModelRefusalStop;
 }
+
+/** The BenchRouter codes by which a model's targets refuse a route's request contract. */
+export const MODEL_CONTRACT_REFUSAL_CODES = ["request_contract_unsupported", "control_unsupported"] as const;
+export type ModelContractRefusalCode = (typeof MODEL_CONTRACT_REFUSAL_CODES)[number];
+
+export function isModelContractRefusalCode(code: string | null): code is ModelContractRefusalCode {
+  return MODEL_CONTRACT_REFUSAL_CODES.some((known) => known === code);
+}
+
+export interface ModelRefusalStop {
+  cause: ModelContractRefusalCode;
+}
+
+/**
+ * EVAL-011: the contract refusal that ended a run, from the stored stop or from failed cases that
+ * all carry a contract refusal code. Null when the model did not refuse the contract.
+ */
+export function modelContractRefusal(diagnostic: EvalRunFailureDiagnostic): ModelContractRefusalCode | null {
+  if (diagnostic.model_refusal) return diagnostic.model_refusal.cause;
+  const failed = diagnostic.cases?.failed ?? [];
+  const codes = failed.map(contractRefusalOfCase);
+  return codes.length > 0 && codes.every((code) => code !== null) ? codes[0] ?? null : null;
+}
+
+/** The contract refusal code a failed model-call case carries, or null. */
+export function contractRefusalOfCase(row: EvalFailedCaseDiagnostic): ModelContractRefusalCode | null {
+  return row.stage === "model_call" && isModelContractRefusalCode(row.cause_code) ? row.cause_code : null;
+}
+
+/**
+ * EVAL-011 / EVAL-012: the failed step of an executable run that ended unmeasured because
+ * BenchRouter refused its model request and the customer evaluator stopped on that refusal
+ * (`refusalExplainedStop`, src/runner/fail-diagnostic.ts). Server-written only.
+ */
+export const REQUEST_REFUSED_FAILED_STEP = "request_refused";
 
 export interface PlatformFailureStop {
   failed: number;
@@ -536,7 +577,7 @@ function parseDiagnostic<Value>(value: Value, stored: boolean): ParseFailureDiag
   const allowed = new Set([
     "v", "source", "reason_code", "failed_step", "github_conclusion", "cases",
     "execution",
-    ...(stored ? ["verification", "diagnostic_rejected", "retry", "runtime_reason", "spend_bound", "time_bound", "provider_outage", "platform_failure"] : [])
+    ...(stored ? ["verification", "diagnostic_rejected", "retry", "runtime_reason", "spend_bound", "time_bound", "provider_outage", "platform_failure", "model_refusal"] : [])
   ]);
   const unknown = unknownKey(value, allowed);
   if (unknown) return invalid(`Failure diagnostic ${unknown} is not allowed`);
@@ -598,6 +639,9 @@ function parseDiagnostic<Value>(value: Value, stored: boolean): ParseFailureDiag
     if (outage !== null) result.provider_outage = outage;
     const platform = parsePlatformFailureStop(value.platform_failure);
     if (platform !== null) result.platform_failure = platform;
+    if (isRecord(value.model_refusal) && isJsonString(value.model_refusal.cause) && isModelContractRefusalCode(value.model_refusal.cause)) {
+      result.model_refusal = { cause: value.model_refusal.cause };
+    }
   }
   return { ok: true, value: result };
 }

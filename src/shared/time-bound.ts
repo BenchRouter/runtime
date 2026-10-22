@@ -57,7 +57,7 @@ function minutes(seconds: number): string {
 
 /** EVAL-011: the plain reason shown for a chain stopped at its time bound. */
 export function timeBoundStopCopy(stop: TimeBoundStop): string {
-  const basis = `${TIME_BOUND_MULTIPLIER}× the baseline's ${minutes(stop.bound_s / TIME_BOUND_MULTIPLIER)} for this eval`;
+  const basis = `${TIME_BOUND_MULTIPLIER}× the comparison model's ${minutes(stop.bound_s / TIME_BOUND_MULTIPLIER)} for this eval`;
   const counted = "provider and model time, including failed attempts";
   if (stop.next_wait_s !== undefined) {
     return `Stopped after ${minutes(stop.used_s)}: not enough of its ${minutes(stop.bound_s)} left for the next retry (${basis}; ${counted}).`;
