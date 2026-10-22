@@ -9,6 +9,7 @@
 // major, the work mode and capability names (principle 5: fail closed on the unknown).
 // It holds no other runtime logic.
 
+import { parseCaseReuseSummary, type CaseReuse } from "./case-reuse";
 import type { EvalRunFailureReasonCode } from "./failure-codes";
 import type { JsonObject, JsonValue } from "./json-parse-contracts";
 
@@ -146,8 +147,8 @@ export function parseRunnerWorkMode(value: JsonValue): RunnerWorkMode | null {
  * EVAL-002 (§2.3 G11): the runtime replay semantics revisions. A release declares
  * at most one, `replay_semantics_<n>`; `n` is bumped by hand when the runtime's
  * replay request body (`buildReplayBody`) or the scorer host's semantics change.
- * A case result is carried only between runs of the same revision. A runtime
- * that declares none produces runs that are never carry sources or targets.
+ * Every grant of a run runs under the revision its first grant stamped, so one
+ * run's cases are scored under one semantics.
  * The first entry is the current revision. An older entry stays only so the server can deploy
  * before the pointer moves to the release that declares the new one; drop it once the pointer
  * has moved and every job and session of the older release has finished (a live session
@@ -1003,6 +1004,23 @@ export interface RunnerReceipt {
    * such as `case_failures` when an earlier batch of the run failed a case.
    */
   failure_reason?: EvalRunFailureReasonCode;
+  /**
+   * EVAL-002 / EVAL-003: an `uploaded` receipt of a replay run only: the whole
+   * run's result and how its cases got their evidence. Kept with the receipt, so a
+   * receipt read returns it too; runtimes that predate it ignore it.
+   */
+  run_summary?: RunnerRunSummary;
+}
+
+/** EVAL-002 / EVAL-003: an uploaded replay run, all its batches included. */
+export interface RunnerRunSummary extends CaseReuse {
+  pass_count: number;
+  case_count: number;
+}
+
+/** A stored receipt's run summary, or null unless every count is a non-negative integer. */
+export function parseRunSummary(value: JsonValue | undefined): RunnerRunSummary | null {
+  return parseCaseReuseSummary(value);
 }
 
 /** Upload and fail are mutually exclusive: the loser gets `409 work_terminal` (`RunnerWorkTerminalErrorBody`). */

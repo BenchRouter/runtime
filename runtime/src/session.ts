@@ -573,7 +573,10 @@ async function commit(control: ControlContext, client: RunnerClient, item: Runne
         summary.stored(item.work_id, item.model_run.model, rows.length + failures.length, failures.length);
         return "uploaded";
       }
-      summary.uploaded(item.work_id, item.model_run.model, outcome.rows.length, outcome.rows.filter((row) => row.pass).length);
+      summary.uploaded(
+        item.work_id, item.model_run.model, outcome.rows.length, outcome.rows.filter((row) => row.pass).length,
+        item.mode === "isolated_replay", committed.receipt.run_summary
+      );
       return "uploaded";
     }
     const failure: RunnerFailRequest = {

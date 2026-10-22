@@ -117,7 +117,11 @@ export const EVAL_RUN_FAILURE_REASON_CODES = [
   "setup_failed",
   // EVAL-011 / RUN-001: more than half of the run's cases failed at the model's provider, so the
   // run measured an outage, not the model. Server-written only; the run is unmeasured and retried.
-  "provider_outage"
+  "provider_outage",
+  // EVAL-011 / RUN-001: a case could not be answered because of BenchRouter (settlement, routing
+  // contract, credentials, quota, transport, its circuit breaker), so the run measured our
+  // failure, not the model. Server-written only; the run is unmeasured and retried.
+  "platform_failure"
 ] as const;
 export type EvalRunFailureReasonCode = (typeof EVAL_RUN_FAILURE_REASON_CODES)[number];
 
@@ -127,6 +131,14 @@ export type EvalRunFailureReasonCode = (typeof EVAL_RUN_FAILURE_REASON_CODES)[nu
  * fault of the upload, the eval or the model.
  */
 export const EVIDENCE_UNVERIFIED_FAILED_STEP = "evidence_unverified";
+
+/**
+ * EVAL-011: the failed step of a dispatch that the owning account's billing refused. Only the
+ * account owner can fix it: `billing_refused` has no available balance (add eval credits),
+ * `billing_inactive` has an account that is not active (reactivate billing).
+ */
+export const BILLING_REFUSED_FAILED_STEP = "billing_refused";
+export const BILLING_INACTIVE_FAILED_STEP = "billing_inactive";
 
 export const EVAL_RUN_FAILURE_SOURCES = [
   "workflow_fail_step",
@@ -180,6 +192,10 @@ export interface EvalSucceededCaseDiagnostic {
 // and a bounded cause code or error class. A free-text message could quote the
 // model output (a scorer exception often does), so an uploaded or previously
 // stored `message` is accepted and dropped, never stored or shown.
+/** EVAL-011: the party that owned a failed case (the model's answer is never a failure). */
+export const EVAL_CASE_PARTIES = ["provider", "platform", "judge"] as const;
+export type EvalCaseParty = (typeof EVAL_CASE_PARTIES)[number];
+
 export interface EvalFailedCaseDiagnostic {
   case_id: string;
   stage: EvalCaseFailureStage;
@@ -189,10 +205,16 @@ export interface EvalFailedCaseDiagnostic {
   model_call_id: string | null;
   latency_ms: number | null;
   /**
-   * EVAL-011: whether the failed case is critical, as the runtime read it from the
-   * case. The server needs it to score a provider failure as a failed case.
+   * EVAL-011: whether the failed case is critical, as the runtime read it from the case.
+   * Display detail only: a failed case is never scored, so the rule does not read it.
    */
   critical?: boolean;
+  /**
+   * EVAL-011: who owned the failure (`src/evals/case-attribution.ts`), written by the server at
+   * upload from the code and the call ledger. An upload cannot set it. A diagnostic stored
+   * without it falls back to the code-only attribution.
+   */
+  party?: EvalCaseParty;
   /**
    * SERVE-004 / DATA-001: why the upstream rejected this case's model request.
    * The server adds it from its own call rows (`withRejectionReasons`); an
@@ -231,11 +253,10 @@ export const EVAL_CASE_OUTCOME_ERROR = {
 export const EVAL_CASE_FAILED_ERROR = "The case reported a failure.";
 
 /**
- * EVAL-011 / RUN-001: the outcome codes of a case whose model call failed at its
- * provider. The server writes them, for the failed case it scores (pass false,
- * score 0); the cause shows the owner why the case failed. They are not output
- * facts, so their stored error is the neutral fixed text and the owner reads
- * `EVAL_PROVIDER_FAILURE_TEXT`.
+ * EVAL-011 / RUN-001: the causes of a case whose model call failed at its provider. Only the
+ * model's answer is scored, so no row carries them any more: they name the cause of a
+ * `provider_outage` run, and they label the case rows that #473 stored before migration 0142
+ * ended those runs as unmeasured (the dashboard still reads them from a failed run).
  */
 export const EVAL_PROVIDER_FAILURE_CODES = [
   "provider_timeout",
@@ -340,6 +361,17 @@ export interface EvalRunFailureDiagnostic {
    * cases failed at the provider, and the most common cause. Server-written only.
    */
   provider_outage?: ProviderOutageStop;
+  /**
+   * EVAL-011: the BenchRouter failures of a `platform_failure` run: how many of its planned
+   * cases it could not answer, and the most common cause code. Server-written only.
+   */
+  platform_failure?: PlatformFailureStop;
+}
+
+export interface PlatformFailureStop {
+  failed: number;
+  planned: number;
+  cause: string;
 }
 
 export interface ProviderOutageStop {
@@ -504,7 +536,7 @@ function parseDiagnostic<Value>(value: Value, stored: boolean): ParseFailureDiag
   const allowed = new Set([
     "v", "source", "reason_code", "failed_step", "github_conclusion", "cases",
     "execution",
-    ...(stored ? ["verification", "diagnostic_rejected", "retry", "runtime_reason", "spend_bound", "time_bound", "provider_outage"] : [])
+    ...(stored ? ["verification", "diagnostic_rejected", "retry", "runtime_reason", "spend_bound", "time_bound", "provider_outage", "platform_failure"] : [])
   ]);
   const unknown = unknownKey(value, allowed);
   if (unknown) return invalid(`Failure diagnostic ${unknown} is not allowed`);
@@ -512,7 +544,9 @@ function parseDiagnostic<Value>(value: Value, stored: boolean): ParseFailureDiag
   if (!member(EVAL_RUN_FAILURE_SOURCES, value.source)) return invalid("Failure diagnostic source is invalid");
   if (!member(EVAL_RUN_FAILURE_REASON_CODES, value.reason_code)) return invalid("Failure diagnostic reason_code is invalid");
   // An upload never reports an outage: the server decides it from the stored case results.
-  if (!stored && value.reason_code === "provider_outage") return invalid("Failure diagnostic reason_code is invalid");
+  if (!stored && (value.reason_code === "provider_outage" || value.reason_code === "platform_failure")) {
+    return invalid("Failure diagnostic reason_code is invalid");
+  }
   const failedStep = nullableText(value.failed_step, MAX_SMALL, true);
   if (!failedStep.ok) return invalid("Failure diagnostic failed_step is invalid");
   const conclusion = nullableText(value.github_conclusion, MAX_SMALL, true);
@@ -562,6 +596,8 @@ function parseDiagnostic<Value>(value: Value, stored: boolean): ParseFailureDiag
     if (timeBound !== null) result.time_bound = timeBound;
     const outage = parseProviderOutageStop(value.provider_outage);
     if (outage !== null) result.provider_outage = outage;
+    const platform = parsePlatformFailureStop(value.platform_failure);
+    if (platform !== null) result.platform_failure = platform;
   }
   return { ok: true, value: result };
 }
@@ -571,6 +607,14 @@ function parseProviderOutageStop<Value>(value: Value): ProviderOutageStop | null
   if (!isRecord(value) || unknownKey(value, new Set(["failed", "planned", "cause"]))) return null;
   if (!isJsonFiniteNumber(value.failed) || !isJsonFiniteNumber(value.planned) || value.failed < 0 || value.planned < value.failed) return null;
   if (!isJsonString(value.cause) || !isProviderFailureCode(value.cause)) return null;
+  return { failed: Number(value.failed), planned: Number(value.planned), cause: value.cause };
+}
+
+/** EVAL-011: a stored platform failure, or null when it is absent or unreadable (display detail only). */
+function parsePlatformFailureStop<Value>(value: Value): PlatformFailureStop | null {
+  if (!isRecord(value) || unknownKey(value, new Set(["failed", "planned", "cause"]))) return null;
+  if (!isJsonFiniteNumber(value.failed) || !isJsonFiniteNumber(value.planned) || value.failed < 0 || value.planned < value.failed) return null;
+  if (!isJsonString(value.cause) || !SAFE_CODE.test(value.cause)) return null;
   return { failed: Number(value.failed), planned: Number(value.planned), cause: value.cause };
 }
 
@@ -714,6 +758,15 @@ function parseSucceeded<Value>(value: Value): { ok: true; value: EvalSucceededCa
   return { ok: true, value: { case_id: caseId, model_call_ids: modelCallIds } };
 }
 
+/**
+ * EVAL-011: a failed case read back from `runner_case_results.failure_json`, which holds the
+ * server's own copy of the uploaded diagnostic plus its `party`. Null when it does not parse.
+ */
+export function parseStoredFailedCase<Value>(value: Value): EvalFailedCaseDiagnostic | null {
+  const parsed = parseFailed(value, true);
+  return parsed.ok ? parsed.value : null;
+}
+
 function parseFailed<Value>(
   value: Value,
   stored: boolean
@@ -722,7 +775,7 @@ function parseFailed<Value>(
   const unknown = unknownKey(value, new Set([
     "case_id", "stage", "error_code", "cause_code", "cause_name", "message", "model_call_id", "latency_ms", "critical",
     // Server-written only: an upload that carries it is refused as an unknown key.
-    ...(stored ? ["rejection"] : [])
+    ...(stored ? ["rejection", "party"] : [])
   ]));
   if (unknown) return invalid(`Failure diagnostic failed case ${unknown} is not allowed`);
   // EVAL-011 / RUN-001: case IDs are opaque bounded identities, not error codes.
@@ -766,6 +819,9 @@ function parseFailed<Value>(
   // diagnostic unreadable, so it cannot change a retry classification.
   const rejection = stored ? parseStoredRejectionReason(value.rejection) : null;
   if (rejection) failed.rejection = rejection;
+  // Server-written only. An unknown stored value is dropped, never an unreadable diagnostic.
+  const party = stored ? EVAL_CASE_PARTIES.find((known) => known === value.party) : undefined;
+  if (party !== undefined) failed.party = party;
   return { ok: true, value: failed };
 }
 
