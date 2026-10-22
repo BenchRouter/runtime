@@ -8,3 +8,5 @@ src/shared/sdk-base-url.ts
 src/shared/spend-bound.ts
 src/shared/time-bound.ts
 src/setup-packet/scorer-sandbox-source.ts
+src/shared/case-reuse.ts
+src/shared/json-schema-check.ts

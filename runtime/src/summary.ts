@@ -3,6 +3,8 @@
 // infra, harness or upload-error cause, and on a protocol error. Provider-only failures
 // are data: they are annotated, and the job still succeeds.
 import { appendFile } from "node:fs/promises";
+import { caseReuseLine } from "../../src/shared/case-reuse";
+import type { RunnerRunSummary } from "../../src/shared/runner-protocol";
 
 export type FailureClass = "provider" | "harness" | "infra";
 
@@ -19,6 +21,10 @@ export class JobSummary {
   private readonly failures = new Map<string, number>();
   private uploads = 0;
   private batches = 0;
+  /** EVAL-002 / EVAL-003: whole-run case counts of this job's uploaded replay runs, from their receipts. */
+  private casesCalled = 0;
+  private casesRescored = 0;
+  private reuseReported = false;
   private infraOrHarness = false;
   private blocked = false;
   private protocolError: string | null = null;
@@ -31,9 +37,22 @@ export class JobSummary {
     console.log(`BenchRouter: ${line}`);
   }
 
-  uploaded(workId: string, model: string, cases: number, passes: number): void {
+  /**
+   * An uploaded run. A replay run's receipt names the whole run (`run_summary`): its
+   * pass and case counts and how many cases called a model or re-scored a cached
+   * output. Without one (a receipt from a server that predates it) the line says the
+   * counts are unavailable and keeps this batch's own counts.
+   */
+  uploaded(workId: string, model: string, cases: number, passes: number, replay: boolean, run?: RunnerRunSummary): void {
     this.uploads += 1;
-    this.note(`uploaded ${model}: ${passes}/${cases} cases passed (work ${workId})`);
+    if (run !== undefined) {
+      this.casesCalled += run.cases_called;
+      this.casesRescored += run.cases_rescored;
+      this.reuseReported = true;
+      this.note(`uploaded ${model}: ${run.pass_count}/${run.case_count} cases passed; ${caseReuseLine(run)} (work ${workId})`);
+      return;
+    }
+    this.note(`uploaded ${model}: ${passes}/${cases} cases passed${replay ? "; reuse counts unavailable" : ""} (work ${workId})`);
   }
 
   /** §3.3.5: one batch of a run was stored; the run continues with its next batch. */
@@ -86,6 +105,9 @@ export class JobSummary {
       `| Outcome | ${cell(this.outcome)} |`,
       `| Results uploaded | ${this.uploads} |`,
       ...(this.batches > 0 ? [`| Batches stored | ${this.batches} |`] : []),
+      ...(this.reuseReported
+        ? [`| Cases that called models | ${this.casesCalled} |`, `| Cases reused from cache and re-scored | ${this.casesRescored} |`]
+        : []),
       `| Next wake-up | ${cell(this.nextWake ?? "none")} |`,
       ...(this.protocolError ? [`| Protocol error | ${cell(this.protocolError)} |`] : []),
       "",

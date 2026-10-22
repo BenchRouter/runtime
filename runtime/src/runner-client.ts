@@ -4,6 +4,7 @@ import {
   parseRunnerAuthorityCapabilities,
   parseRunnerFeatureCapabilities,
   parseRunnerWorkMode,
+  parseRunSummary,
   RUNNER_BLOCKED_REASONS,
   RUNNER_DONE_REASONS,
   RUNNER_ENDPOINTS,
@@ -128,6 +129,9 @@ function parseReceipt(value: JsonValue | undefined): RunnerReceipt {
   // §3.3.1: the stored failure reason is for the log only, so an unknown code is left out.
   const failureReason = EVAL_RUN_FAILURE_REASON_CODES.find((code) => code === receipt.failure_reason);
   if (failureReason !== undefined) parsed.failure_reason = failureReason;
+  // EVAL-002 / EVAL-003: an uploaded replay run's whole-run counts; a malformed or absent summary is left out.
+  const runSummary = parsed.terminal === "uploaded" ? parseRunSummary(receipt.run_summary) : null;
+  if (runSummary !== null) parsed.run_summary = runSummary;
   return parsed;
 }
 
