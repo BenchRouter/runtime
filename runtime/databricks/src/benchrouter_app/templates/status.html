@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% set binding = session.binding %}
+{% set waiting = (binding.state == "connecting" and not stalled) or binding.disconnect_requested_at or (exposures | selectattr("state", "ne", "exposed") | list) %}
+{% if waiting %}{% set refresh = 10 %}{% endif %}
+{% block body %}
+<h1>Status</h1>
+<p class="lead">
+  {% if binding.state == "verified" %}<span class="badge ok">Connected</span>
+  {% elif binding.state == "connecting" %}<span class="badge wait">Connecting</span>
+  {% else %}<span class="badge bad">{{ state_label[binding.state] }}</span>{% endif %}
+  <code>{{ binding.host }}</code> · <a href="{{ dashboard_url('/account/databricks/' ~ binding.id) }}" target="_blank" rel="noopener">Open in BenchRouter</a>
+</p>
+
+{% if added %}<div class="notice ok">The eval for <code>{{ added }}</code> is added. Its first run starts at the agent's next check.</div>{% endif %}
+{% if binding.disconnect_requested_at %}
+<div class="notice wait">Disconnect is in progress. The agent job is deleting the serving endpoints, the eval job and itself. This page updates when it is done.</div>
+{% elif stalled %}
+<div class="notice bad">
+  <p>Connect did not finish: the agent job has not checked in. Connect again to set it up.</p>
+  {% include "reconnect_form.html" %}
+</div>
+{% elif binding.state == "connecting" %}
+<div class="notice wait">The agent job is starting. Its first check creates the MLflow experiment, the volumes and the results table. This usually takes two or three minutes, and this page updates by itself.</div>
+{% elif binding.state == "agent_silent" %}
+<div class="notice bad">
+  <p>The agent job has missed three checks in a row. Routes keep serving. A workspace admin can check:</p>
+  <ul>
+    <li>the job <code>BenchRouter agent</code>{% if binding.agent_job_id %} (<a href="{{ workspace_url }}/jobs/{{ binding.agent_job_id }}" target="_blank" rel="noopener">open</a>){% endif %}, its schedule, and its last runs;</li>
+    <li>the secret scope <code>benchrouter</code> and its <code>poll-key</code>;</li>
+    <li>the app's service principal <code>{{ app_sp }}</code> still has workspace access.</li>
+  </ul>
+  <p>The status returns to Connected at the next check that works. If the job or its key is gone, connect again: it writes a new key and sets the job up again.</p>
+  {% include "reconnect_form.html" %}
+</div>
+{% endif %}
+
+<div class="card">
+  <p>Last check: {{ binding.last_poll_at or "not yet" }}{% if binding.last_agent_version %} · agent {{ binding.last_agent_version }}{% endif %}</p>
+  <p>Checks every {{ (binding.cadence_seconds // 60) }} minutes. Change it on the <a href="{{ dashboard_url('/account/databricks/' ~ binding.id) }}" target="_blank" rel="noopener">BenchRouter page</a>.</p>
+  <p class="muted">Schema <code>{{ binding.catalog }}.{{ binding.schema }}</code>{% if binding.agent_job_id %} · <a href="{{ workspace_url }}/jobs/{{ binding.agent_job_id }}" target="_blank" rel="noopener">agent job</a>{% endif %}{% if binding.eval_job_id %} · <a href="{{ workspace_url }}/jobs/{{ binding.eval_job_id }}" target="_blank" rel="noopener">eval job runs</a>{% endif %}</p>
+</div>
+
+<h2>Evals in this workspace</h2>
+{% if evals %}
+<div class="table-wrap">
+<table>
+  <tr><th>Route</th><th>Serving</th><th>Last eval</th><th>Secrets</th></tr>
+  {% for row in evals %}
+  <tr>
+    <td><code>{{ row.eval.route_key }}</code><br><span class="muted">{{ row.eval.eval_folder }}</span></td>
+    <td>{{ row.route.serving_model if row.route else "" }}</td>
+    <td>
+      {% if row.route and row.route.latest_eval %}
+        {{ row.route.latest_eval.status }}{% if row.route.latest_eval.best_model %}, best: {{ row.route.latest_eval.best_model }}{% endif %}
+        <br><span class="muted">{{ row.route.latest_eval.decided_at or row.route.latest_eval.created_at }}</span>
+      {% elif row.eval.active_revision is none %}<span class="muted">Waiting for its first run</span>
+      {% else %}<span class="muted">No result yet</span>{% endif %}
+    </td>
+    <td>
+      {% if row.manifest_error %}<span class="badge bad">Check</span> {{ row.manifest_error }}
+      {% elif not row.secrets %}<span class="muted">None named</span>
+      {% else %}
+        {% set missing = row.secrets | rejectattr("readable") | list %}
+        {% if not missing %}<span class="badge ok">All readable</span>
+        {% else %}
+          <p>The app cannot read {{ missing | length }} of {{ row.secrets | length }}. In a terminal, give it READ on each scope:</p>
+          <pre>{% for scope in missing | map(attribute="scope") | unique %}databricks secrets put-acl {{ scope }} {{ app_sp }} READ
+{% endfor %}</pre>
+          <ul>{% for secret in missing %}<li><code>{{ secret.env }}</code>: <code>{{ secret.scope }}/{{ secret.key }}</code></li>{% endfor %}</ul>
+        {% endif %}
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
+{% else %}
+<p class="muted">No route has an eval here yet. <a href="/evals">Add eval</a>.</p>
+{% endif %}
+
+<h2>Serving endpoints</h2>
+{% if exposures %}
+<ul>{% for exposure in exposures %}<li><code>{{ exposure.endpoint_name }}</code> for <code>{{ exposure.route_key }}</code>: {{ exposure.state }}</li>{% endfor %}</ul>
+{% else %}<p class="muted">No route is exposed. <a href="/routes">Expose one</a>.</p>{% endif %}
+{% endblock %}

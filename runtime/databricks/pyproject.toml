@@ -1,0 +1,16 @@
+[project]
+name = "benchrouter-databricks"
+version = "0.2.0"
+description = "BenchRouter agent job and eval runner for a Databricks workspace (AUTH-012, RUN-001)."
+requires-python = ">=3.11"
+# PyYAML reads the eval folder's .benchrouter/benchrouter.yml (safe_load only).
+dependencies = ["PyYAML>=6.0"]
+
+[project.scripts]
+agent = "benchrouter_databricks.agent:main"
+runner = "benchrouter_databricks.runner:main"
+results = "benchrouter_databricks.results:main"
+
+[build-system]
+requires = ["uv_build==0.12.5"]
+build-backend = "uv_build"

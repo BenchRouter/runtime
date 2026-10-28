@@ -1,0 +1,7 @@
+# The BenchRouter Databricks App (docs/plan-databricks-integration.md, section 4.1).
+# Install it from this folder. It shares `src/` with the agent wheel: the app builds the wheel
+# from `src/benchrouter_databricks` at Connect and gives it to the agent job.
+command:
+  - sh
+  - -c
+  - exec gunicorn --chdir src --workers 2 --threads 8 --timeout 170 --bind 0.0.0.0:${DATABRICKS_APP_PORT:-8000} benchrouter_app.main:app

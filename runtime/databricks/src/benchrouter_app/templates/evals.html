@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>Add eval</h1>
+<p class="lead">Pick a route and the workspace folder that holds its eval. Your coding agent writes the folder: the eval code, the scorers, and a <code>.benchrouter/benchrouter.yml</code> like a repo's, which names the cases table and any secrets. From then on the route's eval runs on the agent job in this workspace.</p>
+
+{% if error %}
+<div class="notice bad">
+  <p>{{ error }}</p>
+  {% if declaration %}<p>A route has one eval source. To change this route's eval, edit <code>{{ declaration.config_path }}</code> in <code>{{ declaration.repo_full_name }}</code>.</p>{% endif %}
+</div>
+{% endif %}
+{% if refusal %}
+<div class="notice bad">
+  <p>BenchRouter added the eval, but Databricks refused to share its data with the app's service principal:</p>
+  <pre>{{ refusal.statement }}</pre>
+  <p>{{ refusal.message }}</p>
+  {% if refusal.owners %}<p>Owners:</p><ul>{% for kind, name, owner in refusal.owners %}<li>{{ kind }} <code>{{ name }}</code>: {{ owner }}</li>{% endfor %}</ul>{% endif %}
+  <p>Ask an owner to add this eval from the app, or to grant the access shown above. The eval runs once the service principal can read the folder and the table.</p>
+</div>
+{% endif %}
+
+<form method="post" action="/evals" class="card">
+  <label for="route_key">Route</label>
+  <select id="route_key" name="route_key">
+    {% for route in routes %}
+    <option value="{{ route.route_key }}" {{ 'selected' if route.route_key == form.route_key else '' }}>{{ route.route_key }}{% if route.eval_source == "repo" %} (eval in GitHub){% elif route.eval_source == "hosted" %} (eval on BenchRouter){% elif route.eval_source == "databricks" %} (eval in Databricks){% endif %}</option>
+    {% endfor %}
+  </select>
+  <label for="eval_folder">Eval folder</label>
+  <input id="eval_folder" name="eval_folder" value="{{ form.eval_folder }}" placeholder="/Workspace/Users/you@example.com/evals/triage">
+  <div class="row"><button type="submit">Add eval</button></div>
+</form>
+
+<h2>The manifest</h2>
+<p>The same schema as in a repository, plus a <code>databricks</code> block in the route's <code>eval_pack</code>:</p>
+<pre>routes:
+  - route_id: support/triage
+    eval_pack:
+      executable:
+        secret_env: [JUDGE_API_KEY]
+      databricks:
+        cases_table: main.support.triage_cases
+        secret_scope: support-evals</pre>
+<p>Each <code>secret_env</code> value lives in <code>secret_scope</code> under a key of the same name, as a GitHub secret has the variable's name.</p>
+<p>The app never asks for a secret value. Keep each secret in your own scope, and give the app's service principal READ on that scope. The Status screen lists any secret it cannot read yet.</p>
+{% endblock %}
