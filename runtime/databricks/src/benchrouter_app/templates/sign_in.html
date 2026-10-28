@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% if pending %}{% set refresh = 3 %}{% endif %}
+{% block body %}
+<h1>Sign in to BenchRouter</h1>
+{% if notice %}<div class="notice wait">{{ notice }}</div>{% endif %}
+{% if pending %}
+<p class="lead">Open the link, sign in, and approve the account this workspace should use. This page moves on by itself after you approve.</p>
+<div class="card">
+  <p><a href="{{ pending.authorize_url }}" target="_blank" rel="noopener">Approve in BenchRouter</a></p>
+  <p class="muted">The link works until {{ pending.expires_at }}.</p>
+</div>
+{% else %}
+<p class="lead">This app links the workspace to a BenchRouter account. Sign in as an owner or admin of that account. The sign-in lasts as long as a CLI sign-in. Only your Databricks user can use it.</p>
+<form method="post" action="/sign-in"><button type="submit">Sign in</button></form>
+{% endif %}
+{% endblock %}

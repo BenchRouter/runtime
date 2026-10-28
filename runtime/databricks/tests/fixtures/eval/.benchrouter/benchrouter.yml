@@ -1,0 +1,31 @@
+# A recorded Databricks eval: the GitHub manifest schema, with the Databricks block.
+product:
+  slug: oidc-fixtures
+routes:
+  - route_id: oidc-fixtures/claims
+    id: claims
+    name: Claims
+    call_site:
+      base_url_env: OPENAI_BASE_URL
+    eval_pack:
+      mode: repository_executable
+      api_family: openai_chat_completions
+      lockfile: requirements.lock
+      input_refs: [code/predict.py]
+      acceptance_refs: [code/scorers.py]
+      primary_metric: exact
+      timeout_minutes: 30
+      secret_env: [JUDGE_API_KEY]
+      databricks:
+        cases_table: main.evals.cases
+        secret_scope: acme-evals
+        cases: {id_column: case_id, inputs_column: inputs, expectations_column: expectations, critical_column: critical}
+        predict: {file: code/predict.py, function: predict_fn}
+        scorers: {file: code/scorers.py, attribute: SCORERS}
+        normalization:
+          version: 1
+          metrics:
+            - {name: exact, assessment: exact, type: boolean, required: true}
+            - {name: tone, assessment: tone, type: categorical, values: {good: 1, maybe: 0.5}, required: true}
+            - {name: broken, assessment: broken, type: boolean, required: false}
+          pass_rule: {metrics: [exact], min_score: 1}

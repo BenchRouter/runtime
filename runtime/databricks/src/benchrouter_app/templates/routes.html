@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% set pending_exposure = exposures.values() | selectattr("state", "ne", "exposed") | list %}
+{% if pending_exposure %}{% set refresh = 10 %}{% endif %}
+{% block body %}
+<h1>Routes</h1>
+<p class="lead">Every route of {{ session.sign_in.account.display_name }}. Expose a route to call it from SQL, notebooks, jobs and apps in this workspace. Code outside Databricks calls the route on BenchRouter directly.</p>
+
+{% if created %}<div class="notice ok">Route <code>{{ created }}</code> is ready. It serves the model you chose until an eval finds a better one. Expose it below, or <a href="/evals?route={{ created | urlencode }}">add an eval</a>.</div>{% endif %}
+{% if exposed %}<div class="notice wait">The agent job is creating the serving endpoint for <code>{{ exposed }}</code>. This page updates when it is ready, usually within two minutes.</div>{% endif %}
+
+<div class="table-wrap">
+<table>
+  <tr><th>Route</th><th>Model</th><th>Eval</th><th>In this workspace</th></tr>
+  {% for route in routes %}
+  {% set exposure = exposures.get(route.route_key) %}
+  {% set live = serving.get(route.route_key) %}
+  <tr>
+    <td><code>{{ route.route_key }}</code><br><span class="muted">{{ route.name }}</span></td>
+    <td>{{ (live.serving_model if live else None) or route.model }}</td>
+    <td>
+      {% if route.eval_source == "databricks" %}Databricks
+      {% elif route.eval_source == "repo" %}GitHub{% if live and live.repo_full_name %} (<code>{{ live.repo_full_name }}</code>){% endif %}
+      {% elif route.eval_source == "hosted" %}BenchRouter
+      {% else %}<a href="/evals?route={{ route.route_key | urlencode }}">Add eval</a>{% endif %}
+    </td>
+    <td>
+      {% if exposure %}
+        {% if exposure.state == "exposed" %}<span class="badge ok">Ready</span>{% elif exposure.state == "retiring" %}<span class="badge wait">Removing</span>{% else %}<span class="badge wait">Creating</span>{% endif %}
+        <code>{{ exposure.endpoint_name }}</code>
+        {% if exposure.state == "exposed" %}
+        <pre>SELECT ai_query('{{ exposure.endpoint_name }}', 'Hello')</pre>
+        {% endif %}
+        {% if exposure.state != "retiring" %}
+        <form method="post" action="/routes/unexpose"><input type="hidden" name="route_key" value="{{ route.route_key }}"><button class="quiet" type="submit">Remove endpoint</button></form>
+        {% endif %}
+      {% else %}
+        {% if expose_error and expose_error.route_key == route.route_key %}<div class="notice bad">{{ expose_error.message }}</div>{% endif %}
+        <form method="post" action="/routes/expose" class="inline">
+          <input type="hidden" name="route_key" value="{{ route.route_key }}">
+          <input name="endpoint_name" aria-label="Endpoint name" value="{{ default_endpoint(route.route_key) }}" size="24">
+          <input name="query_principal" aria-label="Account group that may call it" value="account users" size="12" title="An account group that may call the endpoint">
+          <button type="submit">Expose</button>
+        </form>
+      {% endif %}
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="4" class="muted">This account has no routes yet. Create one below.</td></tr>
+  {% endfor %}
+</table>
+</div>
+
+<h2>New route</h2>
+<form method="post" action="/routes/new" class="card">
+  {% if new_route_error %}<div class="notice bad">{{ new_route_error }}</div>{% endif %}
+  <label for="product">Product</label>
+  <input id="product" name="product" list="products" value="{{ new_route_form.product if new_route_form else '' }}" placeholder="Support bot">
+  <datalist id="products">{% for product in products %}<option value="{{ product }}">{% endfor %}</datalist>
+  <p class="muted">A route joins the product of the same name, or a new product.</p>
+  <label for="name">Route name</label>
+  <input id="name" name="name" value="{{ new_route_form.name if new_route_form else '' }}" placeholder="Triage">
+  <label for="model">Model</label>
+  <select id="model" name="model">
+    {% for model in models %}<option value="{{ model }}" {{ 'selected' if new_route_form and new_route_form.model == model else '' }}>{{ model }}</option>{% endfor %}
+  </select>
+  <p class="muted">The route serves this model until an eval finds a better one.</p>
+  <div class="row"><button type="submit">Create route</button></div>
+</form>
+
+<h2>Call a route from outside Databricks</h2>
+<p>Use the OpenAI SDK with a BenchRouter key from the <a href="{{ dashboard_url('/account') }}" target="_blank" rel="noopener">dashboard</a>:</p>
+<pre>from openai import OpenAI
+client = OpenAI(base_url="https://api.benchrouter.com/v1", api_key=BENCHROUTER_API_KEY)
+client.chat.completions.create(model="&lt;route&gt;", messages=[{"role": "user", "content": "Hello"}])</pre>
+<p>Inside Databricks, call an exposed route by its endpoint name, with a Databricks token:</p>
+<pre>client = OpenAI(base_url="{{ workspace_url }}/serving-endpoints", api_key=DATABRICKS_TOKEN)
+client.chat.completions.create(model="&lt;endpoint name&gt;", messages=[{"role": "user", "content": "Hello"}])</pre>
+{% endblock %}

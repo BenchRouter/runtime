@@ -1,0 +1,131 @@
+{
+ "cases": [
+  {
+   "assessments": [
+    {
+     "error": null,
+     "name": "rating",
+     "source_type": "CODE",
+     "value": 12
+    },
+    {
+     "error": null,
+     "name": "exact",
+     "source_type": "CODE",
+     "value": true
+    },
+    {
+     "error": null,
+     "name": "tone",
+     "source_type": "CODE",
+     "value": "maybe"
+    },
+    {
+     "error": null,
+     "name": "always",
+     "source_type": "CODE",
+     "value": true
+    },
+    {
+     "error": "SCORER_ERROR",
+     "name": "broken",
+     "source_type": "CODE",
+     "value": null
+    },
+    {
+     "error": null,
+     "name": "answer",
+     "source_type": "HUMAN",
+     "value": "yes"
+    }
+   ],
+   "case_id": "c3",
+   "trace_id": "tr-b19ace19d87d93064fba17d321e1ae0e"
+  },
+  {
+   "assessments": [
+    {
+     "error": null,
+     "name": "tone",
+     "source_type": "CODE",
+     "value": "good"
+    },
+    {
+     "error": null,
+     "name": "always",
+     "source_type": "CODE",
+     "value": true
+    },
+    {
+     "error": null,
+     "name": "exact",
+     "source_type": "CODE",
+     "value": true
+    },
+    {
+     "error": null,
+     "name": "rating",
+     "source_type": "CODE",
+     "value": 7
+    },
+    {
+     "error": "SCORER_ERROR",
+     "name": "broken",
+     "source_type": "CODE",
+     "value": null
+    },
+    {
+     "error": null,
+     "name": "answer",
+     "source_type": "HUMAN",
+     "value": "yes"
+    }
+   ],
+   "case_id": "c1",
+   "trace_id": "tr-f630736f9b81cf445b92fde034489415"
+  },
+  {
+   "assessments": [
+    {
+     "error": null,
+     "name": "exact",
+     "source_type": "CODE",
+     "value": false
+    },
+    {
+     "error": null,
+     "name": "tone",
+     "source_type": "CODE",
+     "value": "good"
+    },
+    {
+     "error": null,
+     "name": "always",
+     "source_type": "CODE",
+     "value": true
+    },
+    {
+     "error": null,
+     "name": "rating",
+     "source_type": "CODE",
+     "value": 3
+    },
+    {
+     "error": "SCORER_ERROR",
+     "name": "broken",
+     "source_type": "CODE",
+     "value": null
+    },
+    {
+     "error": null,
+     "name": "answer",
+     "source_type": "HUMAN",
+     "value": "yes"
+    }
+   ],
+   "case_id": "c2",
+   "trace_id": "tr-89241cfceadfd8572301525734c80c5a"
+  }
+ ],
+ "run_id": "6119618849464f4dab44fc49e3277ff8"
+}

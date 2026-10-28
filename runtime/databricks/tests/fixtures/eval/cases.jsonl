@@ -1,0 +1,3 @@
+{"case_id": "c1", "inputs": {"question": "q1"}, "expectations": {"answer": "yes"}, "critical": false}
+{"case_id": "c2", "inputs": {"question": "q2"}, "expectations": {"answer": "yes"}, "critical": true}
+{"case_id": "c3", "inputs": {"question": "q3"}, "expectations": {"answer": "yes"}, "critical": false}
