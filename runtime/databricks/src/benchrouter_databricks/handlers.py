@@ -312,6 +312,21 @@ def rotate_key(ctx: Context, payload: dict[str, Any]) -> Outcome:
 
 # disconnect --------------------------------------------------------------------------
 
+def visible_record(step: str, call: Callable[[], Any]) -> Any:
+    """Reads a record Disconnect hands over. The app SP can always see what it owns, so 403 or 404
+    means the record is not its own: it was handed over before (a Disconnect, then a Reconnect that
+    reused it). That gives None, and the handover skips it. Any other refusal fails the item (the
+    next poll queues it again); a transient error propagates, so the item comes again."""
+    try:
+        return call()
+    except ApiError as error:
+        if error.transient:
+            raise
+        if error.status in (403, 404):
+            return None
+        raise Failed(fixed_code(step, error)) from None
+
+
 def disconnect(ctx: Context, payload: dict[str, Any]) -> Outcome:
     """Plan 4.7: the app SP deletes what it created and hands the records to the admin's group."""
     ws = ctx.workspace
@@ -332,17 +347,20 @@ def disconnect(ctx: Context, payload: dict[str, Any]) -> Outcome:
         permanent("jobs_delete", lambda: ws.delete_job(eval_job_id))
 
     # The results are the customer's records: they stay, handed to the named owner. With no
-    # owner (a Disconnect from the dashboard), they stay with the app SP for an admin.
+    # owner (a Disconnect from the dashboard), they stay with the app SP for an admin. A record
+    # the app SP can no longer see was handed over already (a Disconnect, then a Reconnect that
+    # reused it): it is someone else's, so it is skipped (B7 smoke). A record it can see, it must
+    # hand over: any refusal there fails the item.
     owner = optional_text(payload, "results_owner")
     warehouse_id = optional_text(payload, "warehouse_id")
     table = text(payload, "results_table")
-    if owner is not None and warehouse_id is not None and permanent("table_get", lambda: ws.table_exists(table)):
+    if owner is not None and warehouse_id is not None and visible_record("table_get", lambda: ws.table_exists(table)):
         try:
             statement = f"ALTER TABLE {quote_full_name(table)} OWNER TO {quote_identifier(owner)}"
         except ValueError:
             raise Failed("identifier_invalid") from None
         run_sql(ctx, warehouse_id, "table_owner", statement)
-    experiment_id = permanent("experiment_get", lambda: ws.find_experiment(text(payload, "experiment_path")))
+    experiment_id = visible_record("experiment_get", lambda: ws.find_experiment(text(payload, "experiment_path")))
     if owner is not None and experiment_id is not None:
         permanent("experiment_grant", lambda: ws.grant_experiment(experiment_id, owner, "CAN_MANAGE"))
 

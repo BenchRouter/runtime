@@ -106,10 +106,12 @@ def unexpose_route(token: str, binding_id: str, route_key: str) -> None:
     _call("POST", f"/v1/databricks/bindings/{_segment(binding_id)}/exposures/retire", token, {"route_key": route_key})
 
 
-def disconnect(token: str, binding_id: str, results_owner: str | None) -> dict[str, Any]:
+def disconnect(token: str, binding_id: str, results_owner: str | None, force: bool = False) -> dict[str, Any]:
     body: dict[str, Any] = {}
     if results_owner:
         body["results_owner"] = results_owner
+    if force:
+        body["force"] = True
     return _call("POST", f"/v1/databricks/bindings/{_segment(binding_id)}/disconnect", token, body)
 
 

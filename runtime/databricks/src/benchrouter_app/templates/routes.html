@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% set pending_exposure = exposures.values() | selectattr("state", "ne", "exposed") | list %}
+{% set pending_exposure = exposures.values() | selectattr("state", "ne", "exposed") | selectattr("failure", "none") | list %}
 {% if pending_exposure %}{% set refresh = 10 %}{% endif %}
 {% block body %}
 <h1>Routes</h1>
@@ -25,8 +25,9 @@
     </td>
     <td>
       {% if exposure %}
-        {% if exposure.state == "exposed" %}<span class="badge ok">Ready</span>{% elif exposure.state == "retiring" %}<span class="badge wait">Removing</span>{% else %}<span class="badge wait">Creating</span>{% endif %}
+        {% if exposure.failure %}<span class="badge bad">Failed</span>{% elif exposure.state == "exposed" %}<span class="badge ok">Ready</span>{% elif exposure.state == "retiring" %}<span class="badge wait">Removing</span>{% else %}<span class="badge wait">Creating</span>{% endif %}
         <code>{{ exposure.endpoint_name }}</code>
+        {% if exposure.failure %}<div class="notice bad"><p><strong>{{ exposure.failure.title }}</strong></p><p>{{ exposure.failure.message }}</p></div>{% endif %}
         {% if exposure.state == "exposed" %}
         <pre>SELECT ai_query('{{ exposure.endpoint_name }}', 'Hello')</pre>
         {% endif %}

@@ -1,0 +1,22 @@
+{
+  "_source": "Recorded 2026-10-28 in the BenchRouter test workspace (B7): a results table the caller can see, then ALTER TABLE ... OWNER TO a principal that does not exist.",
+  "table_get": {
+    "name": "benchrouter_eval_results",
+    "catalog_name": "workspace",
+    "schema_name": "br-b7-handover",
+    "full_name": "workspace.br-b7-handover.benchrouter_eval_results",
+    "table_type": "MANAGED",
+    "data_source_format": "DELTA"
+  },
+  "owner_statement": {
+    "statement_id": "recorded",
+    "status": {
+      "state": "FAILED",
+      "error": {
+        "error_code": "BAD_REQUEST",
+        "message": "[RequestId=recorded ErrorClass=PRINCIPAL_DOES_NOT_EXIST.PRINCIPAL_DOES_NOT_EXIST] Could not find principal with name br-b7-no-such-group."
+      },
+      "sql_state": "42704"
+    }
+  }
+}

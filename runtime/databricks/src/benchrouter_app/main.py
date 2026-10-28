@@ -318,7 +318,8 @@ def status(session: Session):
     updated = datetime.fromisoformat(session.binding["updated_at"].replace("Z", "+00:00"))
     stalled = session.binding["state"] == "connecting" and datetime.now(timezone.utc) - updated > CONNECT_STALE
     return page("status.html", session, evals=evals, exposures=detail.get("exposures", []),
-                app_sp=identity.app_sp_client_id(), added=request.args.get("added"), stalled=stalled)
+                app_sp=identity.app_sp_client_id(), added=request.args.get("added"), stalled=stalled,
+                disconnect_failure=detail.get("disconnect_failure"))
 
 
 # Disconnect.
@@ -336,14 +337,17 @@ def disconnect(session: Session):
     if session.binding is None:
         return redirect("/")
     results_owner = (request.form.get("results_owner") or "").strip() or None
+    # "Disconnect anyway", offered only after the agent's Disconnect failed: BenchRouter forgets
+    # the workspace at once, and the app does the agent's cleanup itself.
+    force = request.form.get("force") == "1"
     try:
-        outcome = api.disconnect(session.token, session.binding["id"], results_owner)
+        outcome = api.disconnect(session.token, session.binding["id"], results_owner, force)
     except ApiError as error:
         return page("disconnect.html", session, exposures=(session.detail or {}).get("exposures", []),
                     error=error.message or "Disconnect was refused.")
     if outcome.get("cleanup") == "queued":
         workspace_ops.start_agent(session.binding.get("agent_job_id"))
         return redirect("/status")
-    # No agent ever polled, so no agent cleans up: delete the job and the scope Connect made.
-    workspace_ops.remove_agent(identity.app_workspace())
+    # No agent will clean up (none ever polled, it is silent, or the admin forced it): the app does.
+    workspace_ops.remove_agent(identity.app_workspace(), session.binding, outcome.get("closed_exposures") or [])
     return redirect("/")
