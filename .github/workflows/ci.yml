@@ -35,3 +35,12 @@ jobs:
           version="$(node -p 'require("./runtime/package.json").version')"
           node scripts/release.mjs build --tag "runtime-v$version" --out out
           node --check out/runtime.mjs
+      - name: Build the Databricks wheel twice and compare bytes
+        if: hashFiles('runtime/databricks/pyproject.toml') != ''
+        env:
+          RELEASE_KIND: databricks
+        run: |
+          set -euo pipefail
+          python3 -m pip install --user "uv==0.12.5"
+          version="$(node scripts/release.mjs version)"
+          node scripts/release.mjs build --tag "databricks-v$version" --out out-databricks

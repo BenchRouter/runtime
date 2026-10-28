@@ -1,12 +1,18 @@
 #!/usr/bin/env node
 // BenchRouter runtime release tool. Node built-ins only.
 //
+//   version      (prints the package version of RELEASE_KIND)
 //   build        --tag <tag> --out <dir>
 //   sign         --artifact <file> --expected-digest <sha256:..> --out <dir>   (SIGNING_KEY env = PKCS8 PEM)
 //   remote-state --origin <url> --version <v>
 //   verify       --origin <url> --version <v> [--expected-digest <sha256:..>]
 //   prepare-promotion --origin <url> --api <url> --version <v> --expected-digest <sha256:..> --out <file>
 //   verify-pointer --origin <url> --api <url> --version <v> --expected-digest <sha256:..>
+//
+// RELEASE_KIND picks the signed artifact (RUN-003): `runtime` (default), the GitHub
+// Actions runtime file, or `databricks`, the benchrouter_databricks wheel that the
+// Databricks agent and eval jobs install. Both use the same manifest schema, the same
+// release keys and the same API registry; only the tag, the paths and the build differ.
 //
 // The manifest and envelope types are RuntimeReleaseManifest and
 // SignedRuntimeManifest in the benchrouter repo, src/shared/runner-protocol.ts.
@@ -21,7 +27,17 @@ const ROOT = resolve(import.meta.dirname, "..");
 const SCHEMA = "benchrouter.runtime-manifest.v1";
 const PROTOCOL_MAJOR = 1;
 const NOT_AFTER_DAYS = 180;
-const TAG_PREFIX = "runtime-v";
+const KINDS = {
+  runtime: { tagPrefix: "runtime-v", root: "v1" },
+  databricks: { tagPrefix: "databricks-v", root: "v1/databricks" },
+};
+const KIND_NAME = process.env.RELEASE_KIND ?? "runtime";
+const KIND = KINDS[KIND_NAME];
+if (!KIND) {
+  process.stderr.write(`release: unknown RELEASE_KIND ${KIND_NAME}\n`);
+  process.exit(1);
+}
+const TAG_PREFIX = KIND.tagPrefix;
 const VERSION_CHARS = new Set("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ.-");
 const SPKI_ED25519_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 
@@ -80,12 +96,38 @@ function runtimePackage() {
   return { version, features: [...meta.features] };
 }
 
+// The databricks wheel's version is `[project] version` in runtime/databricks/pyproject.toml.
+function databricksPackage() {
+  const lines = readFileSync(join(ROOT, "runtime", "databricks", "pyproject.toml"), "utf8").split("\n");
+  let section = "";
+  for (const line of lines) {
+    const text = line.trim();
+    if (text.startsWith("[")) section = text;
+    else if (section === "[project]" && text.startsWith("version = \"") && text.endsWith("\"")) {
+      return { version: checkVersion(text.slice("version = \"".length, -1)), features: [] };
+    }
+  }
+  fail("runtime/databricks/pyproject.toml has no [project] version");
+}
+
+function releasePackage() {
+  return KIND_NAME === "databricks" ? databricksPackage() : runtimePackage();
+}
+
+function artifactName(version) {
+  return KIND_NAME === "databricks" ? `benchrouter_databricks-${version}-py3-none-any.whl` : "runtime.mjs";
+}
+
 function artifactPath(version) {
-  return `v1/releases/${version}/runtime.mjs`;
+  return `${KIND.root}/releases/${version}/${artifactName(version)}`;
 }
 
 function manifestPath(version) {
-  return `v1/releases/${version}/manifest.json`;
+  return `${KIND.root}/releases/${version}/manifest.json`;
+}
+
+function pointerPath() {
+  return `${KIND.root}/pointer`;
 }
 
 function rawPublicKey(keyObject) {
@@ -118,7 +160,24 @@ function releaseKeys() {
 // outside runtime/ (runtime/MIRROR.txt lists them at their original paths).
 const SKIP_TOP = new Set([".git", "out", "signed", "artifact"]);
 
+// The wheel builds from runtime/databricks alone, with the pinned uv on PATH. uv_build
+// writes fixed zip timestamps, so two clean builds give the same bytes.
+function buildWheelOnce(workDir) {
+  const source = join(ROOT, "runtime", "databricks");
+  cpSync(source, workDir, {
+    recursive: true,
+    filter: (src) => {
+      const parts = relative(source, src).split(sep);
+      return !parts.some((part) => part === ".venv" || part === "dist" || part === "__pycache__");
+    },
+  });
+  execFileSync("uv", ["build", "--wheel", "--no-cache", "--out-dir", "dist"], { cwd: workDir, stdio: "inherit" });
+  const { version } = databricksPackage();
+  return readFileSync(join(workDir, "dist", artifactName(version)));
+}
+
 function buildOnce(workDir) {
+  if (KIND_NAME === "databricks") return buildWheelOnce(workDir);
   cpSync(ROOT, workDir, {
     recursive: true,
     filter: (src) => {
@@ -137,8 +196,8 @@ function cmdBuild() {
   const a = args();
   const tag = need(a, "tag");
   const outDir = need(a, "out");
-  const { version, features } = runtimePackage();
-  if (tag !== `${TAG_PREFIX}${version}`) fail(`tag ${tag} does not match runtime/package.json version ${version}`);
+  const { version, features } = releasePackage();
+  if (tag !== `${TAG_PREFIX}${version}`) fail(`tag ${tag} does not match the ${KIND_NAME} package version ${version}`);
 
   // Two builds from clean copies must produce the same bytes, so anyone can
   // rebuild the tagged public commit and get the signed digest.
@@ -150,12 +209,12 @@ function cmdBuild() {
   if (sha256(second) !== digest) fail(`build is not reproducible: ${digest} vs ${sha256(second)}`);
 
   mkdirSync(outDir, { recursive: true });
-  writeFileSync(join(outDir, "runtime.mjs"), first);
+  writeFileSync(join(outDir, artifactName(version)), first);
   setOutput("version", version);
   setOutput("digest", digest);
   summary(
     [
-      `## Runtime build ${version}`,
+      `## ${KIND_NAME === "databricks" ? "Databricks wheel" : "Runtime"} build ${version}`,
       "",
       "Approve signing, publication and promotion only if this version and digest are the ones you expect.",
       "",
@@ -175,7 +234,7 @@ function cmdSign() {
   const artifactFile = need(a, "artifact");
   const expected = need(a, "expected-digest");
   const outDir = need(a, "out");
-  const { version, features } = runtimePackage();
+  const { version, features } = releasePackage();
 
   const bytes = readFileSync(artifactFile);
   const digest = sha256(bytes);
@@ -379,6 +438,7 @@ async function cmdPreparePromotion() {
   // No pointer file is created until artifact/signature/current-key/API checks pass.
   const { version, digest } = await approvedRelease(a);
   writeFileSync(out, `${JSON.stringify({ protocol_major: PROTOCOL_MAJOR, manifest_path: manifestPath(version) })}\n`, { flag: "wx" });
+  setOutput("pointer_path", pointerPath());
   summary(`Prepared promotion of ${version} (${digest}); publication and API status verified.`);
 }
 
@@ -386,7 +446,7 @@ async function cmdVerifyPointer() {
   const a = args();
   const { origin, version, digest } = await approvedRelease(a);
   // A query probe avoids reading the pointer's previous 60-second edge-cache entry.
-  const bytes = await get(`${origin}/v1/pointer?probe=${Date.now()}`);
+  const bytes = await get(`${origin}/${pointerPath()}?probe=${Date.now()}`);
   if (!bytes) fail("the public pointer is missing");
   const pointer = JSON.parse(bytes.toString("utf8"));
   if (pointer.protocol_major !== PROTOCOL_MAJOR || pointer.manifest_path !== manifestPath(version)) {
@@ -395,7 +455,12 @@ async function cmdVerifyPointer() {
   summary(`Public pointer verified: ${version} (${digest}).`);
 }
 
+function cmdVersion() {
+  process.stdout.write(`${releasePackage().version}\n`);
+}
+
 const commands = {
+  version: cmdVersion,
   build: cmdBuild,
   sign: cmdSign,
   "remote-state": cmdRemoteState,
