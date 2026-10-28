@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% set binding = session.binding %}
-{% set waiting = (binding.state == "connecting" and not stalled) or binding.disconnect_requested_at or (exposures | selectattr("state", "ne", "exposed") | list) %}
+{% set waiting = (binding.state == "connecting" and not stalled) or (binding.disconnect_requested_at and not disconnect_failure) or (exposures | selectattr("state", "ne", "exposed") | selectattr("failure", "none") | list) %}
 {% if waiting %}{% set refresh = 10 %}{% endif %}
 {% block body %}
 <h1>Status</h1>
@@ -12,7 +12,14 @@
 </p>
 
 {% if added %}<div class="notice ok">The eval for <code>{{ added }}</code> is added. Its first run starts at the agent's next check.</div>{% endif %}
-{% if binding.disconnect_requested_at %}
+{% if disconnect_failure %}
+<div class="notice bad">
+  <p><strong>{{ disconnect_failure.title }}</strong></p>
+  <p>{{ disconnect_failure.message }}</p>
+  <p>Or disconnect anyway: BenchRouter forgets this workspace now. The app then deletes the serving endpoints, the eval job, the agent job and the secret scope itself. The results table and the experiment stay where they are.</p>
+  <form method="post" action="/disconnect"><input type="hidden" name="force" value="1"><button class="danger" type="submit">Disconnect anyway</button></form>
+</div>
+{% elif binding.disconnect_requested_at %}
 <div class="notice wait">Disconnect is in progress. The agent job is deleting the serving endpoints, the eval job and itself. This page updates when it is done.</div>
 {% elif stalled %}
 <div class="notice bad">
@@ -80,6 +87,6 @@
 
 <h2>Serving endpoints</h2>
 {% if exposures %}
-<ul>{% for exposure in exposures %}<li><code>{{ exposure.endpoint_name }}</code> for <code>{{ exposure.route_key }}</code>: {{ exposure.state }}</li>{% endfor %}</ul>
+<ul>{% for exposure in exposures %}<li><code>{{ exposure.endpoint_name }}</code> for <code>{{ exposure.route_key }}</code>: {% if exposure.failure %}{{ exposure.failure.title }} (<a href="/routes">see Routes</a>){% else %}{{ exposure.state }}{% endif %}</li>{% endfor %}</ul>
 {% else %}<p class="muted">No route is exposed. <a href="/routes">Expose one</a>.</p>{% endif %}
 {% endblock %}

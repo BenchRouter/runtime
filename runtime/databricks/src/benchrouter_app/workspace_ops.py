@@ -16,13 +16,15 @@ from typing import Any
 
 import yaml
 
+from benchrouter_databricks import handlers
 from benchrouter_databricks.transport import ApiError
 from benchrouter_databricks.workspace import Workspace, is_not_found, quote_full_name, quote_identifier, split_full_name
 
 from . import api, identity, store
-from .agent_release import AGENT_ENVIRONMENT
 
 AGENT_JOB_NAME = "BenchRouter agent"
+#: The agent job's one environment: the server's pinned release URL (B6, plan section 4.3).
+AGENT_ENVIRONMENT = "agent"
 #: The eval folder's manifest: the same file and schema as a repo's, so one folder works on either runner.
 EVAL_MANIFEST = ".benchrouter/benchrouter.yml"
 STATEMENT_WAIT_SECONDS = 90
@@ -190,8 +192,19 @@ def start_agent(job_id: int | str | None) -> None:
         pass
 
 
-def remove_agent(app: Workspace) -> None:
-    """After a Disconnect that closed at once (no agent ever polled): delete what Connect made."""
+def remove_agent(app: Workspace, binding: dict[str, Any], exposures: list[dict[str, Any]]) -> None:
+    """After a Disconnect that closed at once (no agent ran the cleanup): the app SP deletes what
+    the agent's `disconnect` would have deleted, with the agent's own code (plan section 4.7).
+
+    Records stay: the results table and the experiment keep their owner. Each step treats an
+    object already gone as deleted, so a repeat is safe.
+    """
+    for exposure in exposures:
+        handlers.remove_exposure(handlers.Context(app, store.SCOPE, None),
+                                 str(exposure["endpoint_name"]), str(exposure["provider_service_name"]))
+    eval_job_id = binding.get("eval_job_id")
+    if eval_job_id is not None:
+        app.delete_job(int(eval_job_id))
     job_id = app.find_job(AGENT_JOB_NAME)
     if job_id is not None:
         app.delete_job(job_id)
