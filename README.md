@@ -96,6 +96,26 @@ For example, `runtime-v1.0.2` finished with its existing protected manual promot
 Do not retag, re-sign, or overwrite an old release
 just to combine approvals. Future reviewed tags use the single protected job.
 
+## Databricks wheel releases
+
+The same flow signs the `benchrouter_databricks` wheel, which the BenchRouter Databricks
+app uploads into a workspace for its agent and eval jobs (RUN-003: a second signed
+artifact kind). It uses the same manifest schema, release keys, approval environment and
+API registry; hello admits a Databricks runner only when the wheel's sha256 is registered.
+
+| URL | Content |
+|---|---|
+| `https://runtime.benchrouter.com/v1/databricks/releases/<version>/benchrouter_databricks-<version>-py3-none-any.whl` | The wheel. |
+| `https://runtime.benchrouter.com/v1/databricks/releases/<version>/manifest.json` | The signed manifest for that file. |
+| `https://runtime.benchrouter.com/v1/databricks/pointer` | The wheel release the app ships now. |
+
+1. `scripts/mirror-databricks.sh <benchrouter-checkout> <version>` copies `runtime/databricks/`.
+2. An organization admin pushes the tag `databricks-v<version>` on the merge commit.
+3. `release-databricks.yml` builds the wheel twice with the pinned uv and requires identical
+   bytes, then one approved job signs, publishes, registers and moves the Databricks pointer.
+
+Every release script command takes `RELEASE_KIND=databricks` to act on the wheel.
+
 ## Verify a release yourself
 
 ```sh
