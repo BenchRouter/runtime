@@ -132,6 +132,12 @@ export type EvalRunFailureReasonCode = (typeof EVAL_RUN_FAILURE_REASON_CODES)[nu
  */
 export const EVIDENCE_UNVERIFIED_FAILED_STEP = "evidence_unverified";
 
+/** EVAL-012: the failed step of an upload whose run has no priced model call, so no cost to measure. */
+export const UNPRICED_RUN_FAILED_STEP = "unknown_live_cost";
+
+/** EVAL-012: the failed step of an executable upload whose run recorded no model call. */
+export const NO_MODEL_CALL_FAILED_STEP = "no_model_call";
+
 /**
  * EVAL-011: the failed step of a dispatch that the owning account's billing refused. Only the
  * account owner can fix it: `billing_refused` has no available balance (add eval credits),
