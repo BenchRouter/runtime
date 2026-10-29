@@ -10,3 +10,6 @@ src/shared/time-bound.ts
 src/setup-packet/scorer-sandbox-source.ts
 src/shared/case-reuse.ts
 src/shared/json-schema-check.ts
+src/shared/model-output.ts
+src/shared/replay-body.ts
+src/shared/case-planning.ts

@@ -209,8 +209,11 @@ export async function runExecutableItem(env: ExecutableEnvironment): Promise<Ite
   // EVAL-012: the install runs where the lockfile is, which is working_directory or a workspace root above it.
   const installDir = executable.lockfileDirectory === null ? treeRoot : path.join(treeRoot, executable.lockfileDirectory);
   const installRun = await runGroup(await installArgv(executable, pinnedPath), installDir, install, workDeadlineAt, signal);
-  if (signal.aborted) throw abortFault(signal);
-  if (installRun.timedOut) throw new ItemFault("deadline_exceeded", "the dependency install ran past the work deadline");
+  // RUN-001 §3.3.1 (#577): an install that overruns the work deadline is a failed install, whichever
+  // deadline timer fired first. The server never holds a failed install: a slow registry heals by itself.
+  // Any other abort (a lost lease, a retiring job) keeps its own cause.
+  if (signal.aborted && abortFault(signal).cause !== "deadline_exceeded") throw abortFault(signal);
+  if (installRun.timedOut || signal.aborted) throw new ItemFault("install_failed", "the dependency install ran past the work deadline");
   if (installRun.startFailed || installRun.exitCode !== 0) throw new ItemFault("install_failed", `the dependency install failed (${installRun.startFailed ? "could not start" : `exit ${installRun.exitCode ?? installRun.signal}`})`);
 
   // 2. §3.2: the install must not change a declared file.

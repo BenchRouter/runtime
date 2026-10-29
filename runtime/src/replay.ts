@@ -21,6 +21,7 @@ import {
   type RunnerWorkItem
 } from "../../src/shared/runner-protocol";
 import type { ReplayCase } from "./cases";
+import { replayRequestBody } from "../../src/shared/replay-body";
 import type { ControlContext } from "./control";
 import { canonicalJson, finiteOrNull, isJsonObject, isJsonString, safeCode, stringOrEmpty, type JsonObject, type JsonValue } from "./json";
 import type { ManifestRoute } from "./manifest";
@@ -418,13 +419,11 @@ function usageCost(parsed: JsonObject): number | null {
  * The declared request replayed verbatim, forced to the route id, never streamed (SERVE-009).
  * EVAL-002: a change to this body, or to the scorer host's semantics, bumps the
  * release's `replay_semantics_<n>` feature (runtime/package.json and
- * RUNNER_REPLAY_SEMANTICS_FEATURES), so no case result carries across it.
+ * RUNNER_REPLAY_SEMANTICS_FEATURES), so no case result carries across it. The body
+ * rule is shared with the Worker executor (`src/shared/replay-body.ts`).
  */
 export function buildReplayBody(testCase: ReplayCase, routeId: string): JsonObject {
-  const body: JsonObject = { ...testCase.body, model: routeId };
-  delete body.stream;
-  delete body.stream_options;
-  return body;
+  return replayRequestBody(testCase.body, routeId);
 }
 
 /**

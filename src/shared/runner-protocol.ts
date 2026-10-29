@@ -9,6 +9,7 @@
 // major, the work mode and capability names (principle 5: fail closed on the unknown).
 // It holds no other runtime logic.
 
+import type { EvalIdentity } from "./eval-identity";
 import { parseCaseReuseSummary, type CaseReuse } from "./case-reuse";
 import type { EvalRunFailureReasonCode } from "./failure-codes";
 import type { JsonObject, JsonValue } from "./json-parse-contracts";
@@ -114,7 +115,7 @@ export const RUNTIME_MANIFEST_NOT_AFTER_DAYS = 180;
 export type Sha256Digest = `sha256:${string}`;
 /** ISO-8601 UTC timestamp, for example `2026-09-30T12:00:00.000Z`. */
 export type RunnerTimestamp = string;
-/** A 40-hex Git commit SHA. */
+/** A 40-hex Git commit SHA. Only the GitHub runtime path (hello, snapshot, ancestry, PR context) carries one. */
 export type GitSha = string;
 
 // ---------------------------------------------------------------------------
@@ -172,6 +173,17 @@ export type RunnerReplaySemanticsFeature = (typeof RUNNER_REPLAY_SEMANTICS_FEATU
  */
 export const RUNNER_FEATURE_CAPABILITIES = ["case_subset", "case_repeats", "pnpm_install", "package_runner_launch", ...RUNNER_REPLAY_SEMANTICS_FEATURES] as const;
 export type RunnerFeatureCapability = (typeof RUNNER_FEATURE_CAPABILITIES)[number];
+
+/**
+ * CAT-006: the planning requirements an executable route reports at its snapshot. An executable
+ * eval freezes no request examples, so they name only the API family; candidate admission adds the
+ * controls and input kinds the route's eval runs were observed to send
+ * (`loadRouteReplayContract`), so an image route admits only vision models. The GitHub runtime
+ * reports these values (runtime/src/snapshot.ts); the Databricks activation composes them here.
+ */
+export function executablePlanningRequirements(apiFamily: string): JsonObject {
+  return { required_parameters: [], api_families: [apiFamily], features: [], input_kinds: ["input.text"], output_kinds: ["text"], protocol_headers: [] };
+}
 
 /** EVAL-012: the frozen lockfile names an executable route may declare, by runtime. */
 export const RUNNER_PNPM_LOCKFILE = "pnpm-lock.yaml";
@@ -524,7 +536,7 @@ export interface RunnerDoneOutcome {
 /** §3.4, §3.10: an identity-proven newer event replaced this session; its leases are fenced. */
 export interface RunnerSupersededOutcome {
   outcome: "superseded";
-  superseded_by: { eval_sha: GitSha; pr_head_sha: GitSha | null };
+  superseded_by: { eval_sha: EvalIdentity; pr_head_sha: GitSha | null };
 }
 
 /**
@@ -807,7 +819,7 @@ export interface RunnerWorkItem {
   auth_origin: RunnerAuthorityOrigin;
   snapshot_id: string;
   contract_digest: Sha256Digest;
-  eval_sha: GitSha;
+  eval_sha: EvalIdentity;
   budget_scope: RunnerBudgetScope;
   model_run: { result_set_id: string; model_run_id: string; model: string; profile: string };
   /** Unknown names here make the runtime answer `blocked: capability_unsupported`. */
