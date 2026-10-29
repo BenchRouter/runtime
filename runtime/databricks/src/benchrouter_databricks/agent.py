@@ -18,6 +18,7 @@ import sys
 from typing import Any
 
 from . import __version__
+from .grants import GrantNeeded
 from .handlers import HANDLERS, Context, Failed
 from .transport import ApiError, TransportError, request_json, with_retries
 from .workspace import Workspace
@@ -104,6 +105,12 @@ def handle_item(ctx: Context, benchrouter: BenchRouter, key: str, item: dict[str
     except Failed as failure:
         log("item failed", item=item["id"], kind=kind, code=failure.code)
         report(benchrouter, key, item, "failed", {}, failure.code)
+        return
+    except GrantNeeded as needed:
+        # Plan 4.4: no run started. BenchRouter cancels the launch with no failure and sends a new one; the
+        # next poll checks again, and the eval shows the missing grants until then.
+        log("item waits for a grant", item=item["id"], kind=kind, grants=len(needed.grants))
+        report(benchrouter, key, item, "grant_needed", {"grants": needed.grants}, None)
         return
     except Exception as error:  # noqa: BLE001 - one item never stops the others
         # Transient, or a fault in this agent: leave it unreported. The lease ends and

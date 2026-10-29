@@ -36,11 +36,11 @@
 <pre>routes:
   - route_id: support/triage
     eval_pack:
-      executable:
-        secret_env: [JUDGE_API_KEY]
+      mode: repository_executable
+      secret_env: [JUDGE_API_KEY]
       databricks:
         cases_table: main.support.triage_cases
         secret_scope: support-evals</pre>
 <p>Each <code>secret_env</code> value lives in <code>secret_scope</code> under a key of the same name, as a GitHub secret has the variable's name.</p>
-<p>The app never asks for a secret value. Keep each secret in your own scope, and give the app's service principal READ on that scope. The Status screen lists any secret it cannot read yet.</p>
+<p>The app never asks for a secret value. Keep each secret in your own scope, and give the app's service principal READ on that scope. Before each run the agent job checks that the service principal can read the folder, the cases table and every secret; the Status screen names any grant it still lacks, with the command.</p>
 {% endblock %}

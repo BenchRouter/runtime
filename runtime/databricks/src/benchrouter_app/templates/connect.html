@@ -29,6 +29,9 @@
   {% else %}
   <input id="warehouse_id" name="warehouse_id" value="{{ form.warehouse_id or '' }}" placeholder="Warehouse id">
   {% endif %}
+  <label for="results_reader">Results group (optional)</label>
+  <input id="results_reader" name="results_reader" value="{{ form.results_reader or '' }}" placeholder="An account group">
+  <p class="muted">The results table and the MLflow experiment hold case-level eval data. Every admin who uses this app can read them. To let more people read them, name an account group here; workspace groups such as users and admins cannot take this grant.</p>
   <div class="row"><button type="submit">Connect</button></div>
 </form>
 <p class="muted">Connect runs these grants as you, on the warehouse you choose: USE CATALOG on the catalog, and USE SCHEMA, CREATE TABLE, CREATE VOLUME and CREATE SERVICE on the schema.</p>

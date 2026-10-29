@@ -1,0 +1,68 @@
+{
+  "_source": "Databricks answers for the app SP's grant checks (plan 4.4). The secret-scope refusal follows the body P16 recorded live (PERMISSION_DENIED for a scope with no ACL), and the table answer follows the B7 recording in fixtures/handover. The workspace-folder and Unity Catalog refusals use Databricks' documented error shape ({error_code, message}) and were not recorded live: the B12 smoke records them. No case content.",
+  "export_refused": {
+    "status": 403,
+    "body": {
+      "error_code": "PERMISSION_DENIED",
+      "message": "User 'app-sp' does not have Read permissions on node /Workspace/Users/admin@example.com/evals/triage/.benchrouter/benchrouter.yml."
+    }
+  },
+  "export_missing": {
+    "status": 404,
+    "body": {
+      "error_code": "RESOURCE_DOES_NOT_EXIST",
+      "message": "Path (/Workspace/Users/admin@example.com/evals/triage/.benchrouter/benchrouter.yml) doesn't exist."
+    }
+  },
+  "folder_status": {
+    "status": 200,
+    "body": {
+      "object_type": "DIRECTORY",
+      "path": "/Workspace/Users/admin@example.com/evals/triage",
+      "object_id": 4242
+    }
+  },
+  "table_get": {
+    "status": 200,
+    "body": {
+      "name": "triage_cases",
+      "catalog_name": "main",
+      "schema_name": "support",
+      "full_name": "main.support.triage_cases",
+      "table_type": "MANAGED",
+      "data_source_format": "DELTA"
+    }
+  },
+  "table_refused": {
+    "status": 403,
+    "body": {
+      "error_code": "PERMISSION_DENIED",
+      "message": "User does not have USE SCHEMA on Schema 'main.support'."
+    }
+  },
+  "scope_refused": {
+    "status": 403,
+    "body": {
+      "error_code": "PERMISSION_DENIED",
+      "message": "User app-sp does not have secret-scopes READ permission on scope acme-evals."
+    }
+  },
+  "scope_keys": {
+    "status": 200,
+    "body": {
+      "secrets": [
+        {
+          "key": "JUDGE_API_KEY",
+          "last_updated_timestamp": 1761700000000
+        }
+      ]
+    }
+  },
+  "run_now": {
+    "status": 200,
+    "body": {
+      "run_id": 7701,
+      "number_in_job": 7701
+    }
+  }
+}
