@@ -2,7 +2,9 @@
 // `.br-eval`, checks it out detached, and verifies HEAD and a clean status. The fetch
 // token reaches git only through a credential helper in the git child's env: never in
 // argv, never in a config file, and the helper answers only for this repository.
-// §3.8: the push-ordering proof reads the default branch's commit graph (no trees).
+// §3.8: the push-ordering proof reads the default branch's commit graph (no trees) in its
+// own empty repository, never in the shallow `.br-eval`: git 2.56 aborts a filtered
+// `--unshallow` fetch there (its repack of local links walks past the shallow boundary).
 import { execFile } from "node:child_process";
 import { mkdir, rm } from "node:fs/promises";
 import path from "node:path";
@@ -11,6 +13,7 @@ import { childEnv, type ControlContext } from "./control";
 import type { StringMap } from "./transport";
 
 export const EVAL_TREE_DIR = ".br-eval";
+const EVAL_GRAPH_DIR = "br-eval-graph";
 const GIT_TIMEOUT_MS = 10 * 60_000;
 
 interface GitResult {
@@ -90,13 +93,18 @@ export async function fetchEvalTree(context: ControlContext, evalSha: string): P
  * §3.8: `descends` = last_imported_sha is an ancestor of eval_sha (vacuously true before
  * the first import); `is_head` = eval_sha is the remote default-branch head now.
  */
-export async function ancestryProof(context: ControlContext, treeRoot: string, evalSha: string, defaultBranch: string, lastImported: string | null): Promise<RunnerAncestryProof> {
+export async function ancestryProof(context: ControlContext, evalSha: string, defaultBranch: string, lastImported: string | null): Promise<RunnerAncestryProof> {
+  const graph = path.join(context.runnerTemp, EVAL_GRAPH_DIR);
+  await rm(graph, { recursive: true, force: true });
+  await mkdir(graph, { recursive: true });
+  await gitOk(context, graph, ["init", "-q", "--bare"]);
+  await gitOk(context, graph, ["remote", "add", "origin", repositoryUrl(context)]);
   const ref = `refs/remotes/origin/${defaultBranch}`;
-  await gitOk(context, treeRoot, ["fetch", "-q", "--no-tags", "--filter=tree:0", "--unshallow", "origin", `+refs/heads/${defaultBranch}:${ref}`]);
-  const head = await gitOk(context, treeRoot, ["rev-parse", ref]);
+  await gitOk(context, graph, ["fetch", "-q", "--no-tags", "--filter=tree:0", "origin", evalSha, `+refs/heads/${defaultBranch}:${ref}`]);
+  const head = await gitOk(context, graph, ["rev-parse", ref]);
   let descends = true;
   if (lastImported !== null) {
-    const check = await git(context, treeRoot, ["merge-base", "--is-ancestor", lastImported, evalSha]);
+    const check = await git(context, graph, ["merge-base", "--is-ancestor", lastImported, evalSha]);
     // 0 = ancestor, 1 = not an ancestor; anything else (an orphaned, unknown commit) is not proof of descent.
     descends = check.code === 0;
   }

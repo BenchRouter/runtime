@@ -287,7 +287,7 @@ async function prepare(control: ControlContext, client: RunnerClient, hello: Run
     byKey.set(route.routeId, { route, fileHashes: contract.file_hashes, evaluatorSecretNames });
   }
   const needsAncestry = hello.purpose === "snapshot_refresh" || control.eventName === "push";
-  const ancestry = needsAncestry ? await ancestryProof(control, tree.root, hello.eval_sha, manifest.product.defaultBranch, hello.last_imported_sha) : null;
+  const ancestry = needsAncestry ? await ancestryProof(control, hello.eval_sha, manifest.product.defaultBranch, hello.last_imported_sha) : null;
   if (Date.now() > Date.parse(hello.prepare_deadline_at)) throw new ProtocolError("the preparation deadline passed before the snapshot");
   const snapshot = await client.snapshot({
     kind: "snapshot",
