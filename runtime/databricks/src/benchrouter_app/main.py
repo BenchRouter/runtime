@@ -158,7 +158,7 @@ def home(session: Session):
 
 def connect_screen(session: Session, **values: Any):
     return page("connect.html", session, warehouses=workspace_ops.warehouses(session.user),
-                form=values.pop("form", {"catalog": "workspace", "schema": "default"}), **values)
+                form=values.pop("form", {"catalog": "workspace", "schema": "default", "results_reader": ""}), **values)
 
 
 @app.post("/connect")
@@ -166,12 +166,13 @@ def connect_screen(session: Session, **values: Any):
 def connect(session: Session):
     if session.binding is not None and session.binding["disconnect_requested_at"] is not None:
         return redirect("/status")
-    form = {name: (request.form.get(name) or "").strip() for name in ("catalog", "schema", "warehouse_id")}
-    if not all(form.values()):
+    form = {name: (request.form.get(name) or "").strip() for name in ("catalog", "schema", "warehouse_id", "results_reader")}
+    if not all(form[name] for name in ("catalog", "schema", "warehouse_id")):
         return connect_screen(session, form=form, error="Choose a catalog, a schema and a SQL warehouse.")
     try:
+        # Plan 4.5: the results group is optional; the admins who use the app always read the results.
         result = workspace_ops.connect(session.token, session.user, session.user_name,
-                                       form["catalog"], form["schema"], form["warehouse_id"])
+                                       form["catalog"], form["schema"], form["warehouse_id"], form["results_reader"] or None)
     except ApiError as error:
         if error.code == "connect_superseded":
             # Another Connect of this workspace finished after this one began; Status shows it.
@@ -307,19 +308,22 @@ def status(session: Session):
     for entry in detail.get("evals", []):
         if entry["state"] != "attached":
             continue
-        try:
-            manifest = workspace_ops.read_manifest(app_sp, entry["eval_folder"], entry["route_key"])
-            secrets, manifest_error = workspace_ops.check_secrets(app_sp, manifest.secrets), None
-        except workspace_ops.ManifestInvalid as invalid:
-            secrets, manifest_error = [], str(invalid)
-        except ApiError:
-            secrets, manifest_error = [], "The app cannot read this folder. Add the eval again to share it."
-        evals.append({"eval": entry, "route": serving.get(entry["route_key"]), "secrets": secrets, "manifest_error": manifest_error})
+        # Plan 4.4: the agent's grant check before each run names any missing grant on the eval
+        # (`grant_needed`, the server's copy). A grant problem shows there, not as a manifest error.
+        manifest_error = None
+        if entry.get("grant_needed") is None:
+            try:
+                workspace_ops.read_manifest(app_sp, entry["eval_folder"], entry["route_key"])
+            except workspace_ops.ManifestInvalid as invalid:
+                manifest_error = str(invalid)
+            except ApiError:
+                manifest_error = "The app cannot read this folder. Add the eval again to share it."
+        evals.append({"eval": entry, "route": serving.get(entry["route_key"]), "manifest_error": manifest_error})
     updated = datetime.fromisoformat(session.binding["updated_at"].replace("Z", "+00:00"))
     stalled = session.binding["state"] == "connecting" and datetime.now(timezone.utc) - updated > CONNECT_STALE
     return page("status.html", session, evals=evals, exposures=detail.get("exposures", []),
                 app_sp=identity.app_sp_client_id(), added=request.args.get("added"), stalled=stalled,
-                disconnect_failure=detail.get("disconnect_failure"))
+                disconnect_failure=detail.get("disconnect_failure"), setup_failure=detail.get("setup_failure"))
 
 
 # Disconnect.

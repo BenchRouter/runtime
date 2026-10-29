@@ -5,9 +5,10 @@ from __future__ import annotations
 import base64
 import os
 import time
+import urllib.parse
 from typing import Any, Callable
 
-from .transport import ApiError, request_json
+from .transport import TIMEOUT_SECONDS, USER_AGENT, ApiError, _api_error, request_json, send
 
 NOT_FOUND_CODES = {"RESOURCE_DOES_NOT_EXIST", "NOT_FOUND", "TABLE_OR_VIEW_NOT_FOUND", "ENDPOINT_NOT_FOUND"}
 STATEMENT_WAIT_SECONDS = 300
@@ -233,6 +234,17 @@ class Workspace:
             if next_chunk is None:
                 return columns, rows
             result = self.call("GET", f"/api/2.0/sql/statements/{statement_id}/result/chunks/{int(next_chunk)}")
+
+    # Unity Catalog volume files (the frozen artifacts), through the Files API.
+    def download(self, path: str) -> bytes | None:
+        """A volume file's bytes, or None when it does not exist. Any other refusal raises ApiError."""
+        url = f"{self.host}/api/2.0/fs/files{urllib.parse.quote(path)}"
+        reply = send("GET", url, {"user-agent": USER_AGENT, **self._auth()}, None, TIMEOUT_SECONDS)
+        if reply.status == 404:
+            return None
+        if not 200 <= reply.status < 300:
+            raise _api_error(reply.status, reply.body)
+        return reply.body
 
     # Workspace files (the eval folder).
     def list_folder(self, path: str) -> list[dict[str, Any]]:

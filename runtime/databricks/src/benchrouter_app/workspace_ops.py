@@ -2,8 +2,8 @@
 
 Connect: register the binding, run its GRANTs as the admin, write the poll key, give the agent
 job its wheel and schedule, and start it. Add eval: share the eval folder and its cases table
-with the app SP, and check which named secrets the app SP can read. The agent job does
-everything else as the app SP.
+with the app SP. The agent job does everything else as the app SP, and checks before each run
+that the app SP can read the folder, the table and every declared secret (plan section 4.4).
 """
 
 from __future__ import annotations
@@ -14,9 +14,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-import yaml
-
 from benchrouter_databricks import handlers
+from benchrouter_databricks.manifest import EvalManifest, ManifestError, load_manifest
 from benchrouter_databricks.transport import ApiError
 from benchrouter_databricks.workspace import Workspace, is_not_found, quote_full_name, quote_identifier, split_full_name
 
@@ -103,7 +102,8 @@ class ConnectResult:
     refusal: GrantRefusal | None = None
 
 
-def connect(token: str, user: Workspace, admin_user_name: str, catalog: str, schema: str, warehouse_id: str) -> ConnectResult:
+def connect(token: str, user: Workspace, admin_user_name: str, catalog: str, schema: str, warehouse_id: str,
+            results_reader: str | None) -> ConnectResult:
     app = identity.app_workspace()
     proof, _ = identity.mint_app_sp_token(identity.APP_SP_PROOF_SCOPE)
     registered = api.register_binding(token, {
@@ -115,6 +115,8 @@ def connect(token: str, user: Workspace, admin_user_name: str, catalog: str, sch
         "schema": schema,
         "warehouse_id": warehouse_id,
         "admin_user_name": admin_user_name,
+        # Plan 4.5: an optional account group that reads the results beside the admins who use the app.
+        "results_reader": results_reader,
     })
     binding_id = str(registered["binding_id"])
     agent = registered["agent"]
@@ -212,37 +214,16 @@ def remove_agent(app: Workspace, binding: dict[str, Any], exposures: list[dict[s
 
 
 # Add eval (plan section 4.4).
-@dataclass
-class SecretCheck:
-    env: str
-    scope: str
-    key: str
-    readable: bool
-
-
-@dataclass
-class EvalManifest:
-    cases_table: str
-    secrets: list[dict[str, str]]
-
-
 class ManifestInvalid(Exception):
     pass
 
 
-def _mapping(value: Any, label: str) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ManifestInvalid(f"{label} must be a mapping.")
-    return value
-
-
 def read_manifest(workspace: Workspace, folder: str, route_key: str) -> EvalManifest:
-    """Reads the route's entry of `<folder>/.benchrouter/benchrouter.yml`, the GitHub schema.
+    """Reads the route's entry of `<folder>/.benchrouter/benchrouter.yml` with the runner's own parser.
 
-    The app reads only what Add eval must share or check: `eval_pack.databricks.cases_table`, and
-    each `eval_pack.executable.secret_env` name, whose value is the key of that name in
-    `eval_pack.databricks.secret_scope` (as a GitHub repository secret has the env's name). The
-    rest of the manifest is the runner's (B6).
+    One parser (`benchrouter_databricks.manifest`) for the app and the runner, so Add eval shares
+    exactly the cases table the refresh reads, and refuses a manifest the runner would refuse. The
+    B11 live smoke found two parsers apart: the app read secrets from another field than the runner.
     """
     path = f"{folder}/{EVAL_MANIFEST}"
     try:
@@ -252,29 +233,12 @@ def read_manifest(workspace: Workspace, folder: str, route_key: str) -> EvalMani
             raise ManifestInvalid(f"{path} was not found.") from None
         raise
     try:
-        parsed = yaml.safe_load(base64.b64decode(answer.get("content") or ""))
-    except yaml.YAMLError:
-        raise ManifestInvalid(f"{EVAL_MANIFEST} is not valid YAML.") from None
-    routes = _mapping(parsed, EVAL_MANIFEST).get("routes")
-    entry = next((route for route in routes if isinstance(route, dict) and route.get("route_id") == route_key), None) \
-        if isinstance(routes, list) else None
-    if entry is None:
-        raise ManifestInvalid(f"{EVAL_MANIFEST} declares no route with route_id {route_key}.")
-    pack = _mapping(entry.get("eval_pack"), "eval_pack")
-    databricks = _mapping(pack.get("databricks"), "eval_pack.databricks")
-    cases_table = databricks.get("cases_table")
-    try:
-        quote_full_name(cases_table if isinstance(cases_table, str) else "")
-    except ValueError:
-        raise ManifestInvalid("eval_pack.databricks.cases_table must name a Unity Catalog table as <catalog>.<schema>.<table>.") from None
-    executable = pack.get("executable")
-    names = (executable.get("secret_env") or []) if isinstance(executable, dict) else []
-    if not isinstance(names, list) or not all(isinstance(name, str) and name for name in names):
-        raise ManifestInvalid("eval_pack.executable.secret_env must be a list of names.")
-    scope = databricks.get("secret_scope")
-    if names and not (isinstance(scope, str) and scope):
-        raise ManifestInvalid("eval_pack.databricks.secret_scope must name the scope that holds the secret_env values.")
-    return EvalManifest(cases_table, [{"env": name, "scope": scope, "key": name} for name in names])
+        text = base64.b64decode(answer.get("content") or "").decode("utf-8")
+        return load_manifest(text, route_key, own_scope=store.SCOPE)
+    except UnicodeDecodeError:
+        raise ManifestInvalid(f"{EVAL_MANIFEST} is not UTF-8 text.") from None
+    except ManifestError as refused:
+        raise ManifestInvalid(f"{EVAL_MANIFEST}: {refused}.") from None
 
 
 def share_eval(user: Workspace, warehouse_id: str, folder: str, cases_table: str) -> GrantRefusal | None:
@@ -297,20 +261,3 @@ def share_eval(user: Workspace, warehouse_id: str, folder: str, cases_table: str
     ]
     return run_grants(user, warehouse_id, statements,
                       [("catalog", catalog), ("schema", f"{catalog}.{schema}"), ("table", cases_table)])
-
-
-def check_secrets(app: Workspace, declared: list[dict[str, str]]) -> list[SecretCheck]:
-    """Which named secrets the app SP can read. Lists key names only; reads no value."""
-    keys_by_scope: dict[str, set[str] | None] = {}
-    checks = []
-    for secret in declared:
-        scope = secret["scope"]
-        if scope not in keys_by_scope:
-            try:
-                listed = app.call("GET", "/api/2.0/secrets/list", query={"scope": scope}).get("secrets") or []
-                keys_by_scope[scope] = {str(entry.get("key")) for entry in listed}
-            except ApiError:
-                keys_by_scope[scope] = None
-        keys = keys_by_scope[scope]
-        checks.append(SecretCheck(secret["env"], scope, secret["key"], keys is not None and secret["key"] in keys))
-    return checks

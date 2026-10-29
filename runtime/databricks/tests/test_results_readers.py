@@ -1,0 +1,63 @@
+"""Plan 4.5: the results table and the experiment are granted to every reader in the payload.
+
+The readers are the recorded admins and the binding's optional results group. A group Databricks
+does not know fails the item with a fixed code, which the binding read shows as a customer-owned
+setup failure (`resultsSetupFailure`); it never passes silently. The table answers are the B7
+recording (fixtures/handover: a principal that does not exist).
+"""
+
+import json
+import unittest
+from pathlib import Path
+
+from benchrouter_databricks.handlers import Context, Failed, setup_experiment, setup_results_table
+from tests.recorded_workspace import RecordedServer
+
+HANDOVER = json.loads((Path(__file__).parent / "fixtures" / "handover" / "visible_table_owner_refused.json").read_text())
+SUCCEEDED = {"status": 200, "body": {"statement_id": "recorded", "status": {"state": "SUCCEEDED"}}}
+REFUSED = {"status": 200, "body": HANDOVER["owner_statement"]}
+TABLE = "workspace.br-b11.benchrouter_eval_results"
+
+
+class ResultsReaders(unittest.TestCase):
+    def setUp(self) -> None:
+        self.server = RecordedServer({})
+        self.ctx = Context(self.server.workspace(), "benchrouter", 99)
+
+    def tearDown(self) -> None:
+        self.server.close()
+
+    def statements(self) -> list[str]:
+        return [body["statement"] for method, path, _, body in self.server.calls if path == "/api/2.0/sql/statements"]
+
+    def payload(self, readers: list[str]) -> dict:
+        return {"object": "results_table", "table": TABLE, "warehouse_id": "recorded",
+                "columns": [{"name": "written_at", "type": "TIMESTAMP"}], "read_principals": readers}
+
+    def test_every_reader_gets_select(self) -> None:
+        self.server.answers["POST /api/2.0/sql/statements"] = [SUCCEEDED]
+        setup_results_table(self.ctx, self.payload(["admin@example.com", "br-results-readers"]))
+        self.assertEqual(self.statements()[1:], [
+            "GRANT SELECT ON TABLE `workspace`.`br-b11`.`benchrouter_eval_results` TO `admin@example.com`",
+            "GRANT SELECT ON TABLE `workspace`.`br-b11`.`benchrouter_eval_results` TO `br-results-readers`",
+        ])
+
+    def test_a_group_databricks_does_not_know_fails_the_item(self) -> None:
+        self.server.answers["POST /api/2.0/sql/statements"] = [SUCCEEDED, SUCCEEDED, REFUSED]
+        with self.assertRaises(Failed) as refused:
+            setup_results_table(self.ctx, self.payload(["admin@example.com", "users"]))
+        self.assertEqual(refused.exception.code, "grant_select_bad_request")
+
+    def test_the_experiment_gets_can_read_for_each_reader(self) -> None:
+        self.server.answers["POST /api/2.0/workspace/mkdirs"] = {"status": 200, "body": {}}
+        self.server.answers["GET /api/2.0/mlflow/experiments/get-by-name"] = {"status": 200, "body": {"experiment": {"experiment_id": "77"}}}
+        self.server.answers["PATCH /api/2.0/permissions/experiments/77"] = {"status": 200, "body": {}}
+        setup_experiment(self.ctx, {"object": "experiment", "path": "/Shared/benchrouter/recorded",
+                                    "read_principals": ["admin@example.com", "br-results-readers"]})
+        acls = [body["access_control_list"] for method, path, _, body in self.server.calls if method == "PATCH"]
+        self.assertEqual(acls, [[{"user_name": "admin@example.com", "permission_level": "CAN_READ"}],
+                                [{"group_name": "br-results-readers", "permission_level": "CAN_READ"}]])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -72,6 +72,16 @@ def optional_text(payload: dict[str, Any], name: str) -> str | None:
     return value
 
 
+def principals(payload: dict[str, Any], name: str) -> list[str]:
+    """An optional list of principal names; absent is none."""
+    value = payload.get(name)
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(entry, str) and entry for entry in value):
+        raise Failed("payload_invalid")
+    return list(value)
+
+
 def integer(payload: dict[str, Any], name: str) -> int:
     value = payload.get(name)
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
@@ -92,11 +102,18 @@ def permanent(step: str, call: Callable[[], Any]) -> Any:
 # launch ------------------------------------------------------------------------------
 
 def launch(ctx: Context, payload: dict[str, Any]) -> Outcome:
-    """`run-now` with BenchRouter's token; a repeat returns the same run (plan 4.3)."""
+    """`run-now` with BenchRouter's token; a repeat returns the same run (plan 4.3).
+
+    First, as the app SP, the eval's grants (plan 4.4): a missing one raises `grants.GrantNeeded`,
+    which the agent reports as `grant_needed`, and no run starts.
+    """
     claim_id = text(payload, "claim_id")
     job_parameters = payload.get("job_parameters")
     if not isinstance(job_parameters, dict) or not all(isinstance(value, str) for value in job_parameters.values()):
         raise Failed("payload_invalid")
+    check = launch_check(ctx, payload)
+    if check is not None:
+        _require_grants(with_retries(check))
     run_id = permanent("run_now", lambda: ctx.workspace.run_now(
         integer(payload, "job_id"), job_parameters, text(payload, "idempotency_token")))
 
@@ -107,6 +124,46 @@ def launch(ctx: Context, payload: dict[str, Any]) -> Outcome:
             with_retries(lambda: ctx.workspace.secret_put(ctx.scope, f"claim-{claim_id}", key))
 
     return Outcome({"run_id": run_id}, release_key)
+
+
+def _require_grants(missing: list[dict[str, str]]) -> None:
+    from . import grants
+
+    grants.require(missing)
+
+
+def launch_check(ctx: Context, payload: dict[str, Any]) -> Callable[[], list[dict[str, str]]] | None:
+    """Plan 4.4: the check of what this launch's run will read, or None when the payload names no target
+    (BenchRouter found no eval row for it at the poll), in which case the launch runs unchecked.
+
+    `grants` is imported here, not at the top: the app imports this module and never launches, so
+    the BenchRouter/databricks-app mirror needs no grant-check modules.
+    """
+    from . import grants
+
+    route_key = optional_text(payload, "route_key")
+    if route_key is None:
+        return None
+    if payload.get("purpose") == "snapshot_refresh":
+        folder = optional_text(payload, "eval_folder")
+        return None if folder is None else (lambda: grants.check_eval(ctx.workspace, folder, route_key, ctx.scope))
+    catalog, schema, digest = optional_text(payload, "catalog"), optional_text(payload, "schema"), optional_text(payload, "artifact_digest")
+    if catalog is None or schema is None or digest is None:
+        return None
+    return lambda: grants.check_frozen(ctx.workspace, catalog, schema, digest, route_key, ctx.scope)
+
+
+def grant_check(ctx: Context, payload: dict[str, Any]) -> Outcome:
+    """Plan 4.4: the claim-less re-check of an eval that waits for a grant, the same check a launch makes.
+
+    A missing grant raises `grants.GrantNeeded` (reported as `grant_needed`); a pass reports done,
+    which clears the eval so BenchRouter launches it again.
+    """
+    check = launch_check(ctx, payload)
+    if check is None:
+        raise Failed("payload_invalid")
+    _require_grants(with_retries(check))
+    return Outcome()
 
 
 def cancel(ctx: Context, payload: dict[str, Any]) -> Outcome:
@@ -145,9 +202,9 @@ def setup_experiment(ctx: Context, payload: dict[str, Any]) -> Outcome:
         # Plan 4.5: the app SP's home folder is deleted with the app.
         raise Failed("experiment_path_invalid")
     experiment_id = permanent("experiment", lambda: ctx.workspace.ensure_experiment(path))
-    reader = optional_text(payload, "read_principal")
-    if reader is not None:
-        permanent("experiment_grant", lambda: ctx.workspace.grant_experiment(experiment_id, reader, "CAN_READ"))
+    # Plan 4.5: the whole reader list each time (the recorded admins and the optional results group).
+    for reader in principals(payload, "read_principals"):
+        permanent("experiment_grant", lambda reader=reader: ctx.workspace.grant_experiment(experiment_id, reader, "CAN_READ"))
     return Outcome({"object": "experiment", "experiment_id": experiment_id})
 
 
@@ -180,8 +237,7 @@ def setup_results_table(ctx: Context, payload: dict[str, Any]) -> Outcome:
     except ValueError:
         raise Failed("identifier_invalid") from None
     run_sql(ctx, warehouse_id, "create_table", f"CREATE TABLE IF NOT EXISTS {quoted} ({', '.join(definitions)})")
-    reader = optional_text(payload, "read_principal")
-    if reader is not None:
+    for reader in principals(payload, "read_principals"):
         try:
             principal = quote_identifier(reader)
         except ValueError:
@@ -288,6 +344,8 @@ SETUP_OBJECTS: dict[str, Callable[[Context, dict[str, Any]], Outcome]] = {
     "results_table": setup_results_table,
     "eval_job": setup_eval_job,
     "serving_endpoint": setup_serving_endpoint,
+    # Plan 4.4: the claim-less re-check of an eval that waits for a grant (a setup item by object).
+    "grant_check": grant_check,
 }
 
 

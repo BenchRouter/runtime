@@ -19,6 +19,12 @@
   <p>Or disconnect anyway: BenchRouter forgets this workspace now. The app then deletes the serving endpoints, the eval job, the agent job and the secret scope itself. The results table and the experiment stay where they are.</p>
   <form method="post" action="/disconnect"><input type="hidden" name="force" value="1"><button class="danger" type="submit">Disconnect anyway</button></form>
 </div>
+{% elif setup_failure %}
+<div class="notice bad">
+  <p><strong>{{ setup_failure.title }}</strong></p>
+  <p>{{ setup_failure.message }}</p>
+  {% include "reconnect_form.html" %}
+</div>
 {% elif binding.disconnect_requested_at %}
 <div class="notice wait">Disconnect is in progress. The agent job is deleting the serving endpoints, the eval job and itself. This page updates when it is done.</div>
 {% elif stalled %}
@@ -51,7 +57,7 @@
 {% if evals %}
 <div class="table-wrap">
 <table>
-  <tr><th>Route</th><th>Serving</th><th>Last eval</th><th>Secrets</th></tr>
+  <tr><th>Route</th><th>Serving</th><th>Last eval</th><th>Grants</th></tr>
   {% for row in evals %}
   <tr>
     <td><code>{{ row.eval.route_key }}</code><br><span class="muted">{{ row.eval.eval_folder }}</span></td>
@@ -64,18 +70,16 @@
       {% else %}<span class="muted">No result yet</span>{% endif %}
     </td>
     <td>
-      {% if row.manifest_error %}<span class="badge bad">Check</span> {{ row.manifest_error }}
-      {% elif not row.secrets %}<span class="muted">None named</span>
-      {% else %}
-        {% set missing = row.secrets | rejectattr("readable") | list %}
-        {% if not missing %}<span class="badge ok">All readable</span>
-        {% else %}
-          <p>The app cannot read {{ missing | length }} of {{ row.secrets | length }}. In a terminal, give it READ on each scope:</p>
-          <pre>{% for scope in missing | map(attribute="scope") | unique %}databricks secrets put-acl {{ scope }} {{ app_sp }} READ
-{% endfor %}</pre>
-          <ul>{% for secret in missing %}<li><code>{{ secret.env }}</code>: <code>{{ secret.scope }}/{{ secret.key }}</code></li>{% endfor %}</ul>
-        {% endif %}
-      {% endif %}
+      {% set needed = row.eval.grant_needed %}
+      {% if needed %}
+        <p><span class="badge bad">Grant needed</span> <strong>{{ needed.title }}</strong></p>
+        <p>{{ needed.message }}</p>
+        <ul>{% for grant in needed.grants %}
+          <li>The app cannot read {{ grant.missing }}. {{ grant.fix }}{% if grant.command %}<pre>{{ grant.command }}</pre>{% endif %}</li>
+        {% endfor %}</ul>
+      {% elif row.manifest_error %}<span class="badge bad">Check</span> {{ row.manifest_error }}
+      {% elif row.eval.active_revision is none %}<span class="muted">The agent checks them before the first run</span>
+      {% else %}<span class="badge ok">None missing</span> <span class="muted">at the agent's last check</span>{% endif %}
     </td>
   </tr>
   {% endfor %}
