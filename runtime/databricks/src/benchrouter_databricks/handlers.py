@@ -144,10 +144,11 @@ def launch_check(ctx: Context, payload: dict[str, Any]) -> Callable[[], list[dic
     route_key = optional_text(payload, "route_key")
     if route_key is None:
         return None
+    catalog, schema = optional_text(payload, "catalog"), optional_text(payload, "schema")
     if payload.get("purpose") == "snapshot_refresh":
         folder = optional_text(payload, "eval_folder")
-        return None if folder is None else (lambda: grants.check_eval(ctx.workspace, folder, route_key, ctx.scope))
-    catalog, schema, digest = optional_text(payload, "catalog"), optional_text(payload, "schema"), optional_text(payload, "artifact_digest")
+        return None if folder is None else (lambda: grants.check_eval(ctx.workspace, folder, route_key, ctx.scope, catalog, schema))
+    digest = optional_text(payload, "artifact_digest")
     if catalog is None or schema is None or digest is None:
         return None
     return lambda: grants.check_frozen(ctx.workspace, catalog, schema, digest, route_key, ctx.scope)
@@ -222,6 +223,18 @@ def run_sql(ctx: Context, warehouse_id: str, step: str, statement: str) -> None:
 
 
 def setup_results_table(ctx: Context, payload: dict[str, Any]) -> Outcome:
+    """Plan 4.5: creates the results table, and gives its readers SELECT while the app SP owns it.
+
+    After a reinstall the table can belong to someone else: a Disconnect handed it to the admin's
+    group, or the app SP that made it is gone. Its owner then decides who reads it, so the app SP
+    grants no reader. Connect gave the app SP SELECT and MODIFY on it as the admin (plan 4.2), so the
+    item is done once the app SP can see it. The owner comes from Unity Catalog `tables/get` as the
+    app SP: B11 smoke 8b recorded 403 PERMISSION_DENIED for a table the app SP has no privilege
+    on, which fails the item (`results_table_get_http_403`), and an `owner` field once it can read
+    it. Before, the item ran `GRANT SELECT` on a table it did not own and failed
+    `grant_select_bad_request`. MODIFY is not checked apart: a refused write shows in the results
+    task, which changes no eval.
+    """
     table = text(payload, "table")
     warehouse_id = text(payload, "warehouse_id")
     columns = payload.get("columns")
@@ -237,6 +250,11 @@ def setup_results_table(ctx: Context, payload: dict[str, Any]) -> Outcome:
     except ValueError:
         raise Failed("identifier_invalid") from None
     run_sql(ctx, warehouse_id, "create_table", f"CREATE TABLE IF NOT EXISTS {quoted} ({', '.join(definitions)})")
+    app_principal = text(payload, "app_principal")
+    found = permanent("results_table_get", lambda: ctx.workspace.call("GET", f"/api/2.1/unity-catalog/tables/{table}"))
+    owner = found.get("owner") if isinstance(found, dict) else None
+    if not isinstance(owner, str) or owner.lower() != app_principal.lower():
+        return Outcome({"object": "results_table", "table_name": table})
     for reader in principals(payload, "read_principals"):
         try:
             principal = quote_identifier(reader)
@@ -370,6 +388,29 @@ def rotate_key(ctx: Context, payload: dict[str, Any]) -> Outcome:
 
 # disconnect --------------------------------------------------------------------------
 
+def drop_volumes(ws: Workspace, names: list[str]) -> None:
+    """Plan 4.7: deletes BenchRouter's working volumes (frozen artifacts and results hand-off).
+
+    They are BenchRouter's scratch: every receipt reached BenchRouter before the runner wrote the
+    results volume, and a later Connect freezes the artifacts again. Unity Catalog's REST delete
+    needs no SQL warehouse. A volume already gone (404) counts as deleted, and one the app SP may
+    not delete (403) is not its own (an earlier app's SP made it), so both are skipped; any other
+    refusal fails the item, which the next poll queues again.
+    """
+    for name in names:
+        try:
+            split_full_name(name)
+        except ValueError:
+            raise Failed("identifier_invalid") from None
+        try:
+            ws.call("DELETE", f"/api/2.1/unity-catalog/volumes/{name}")
+        except ApiError as error:
+            if error.transient:
+                raise
+            if error.status not in (403, 404):
+                raise Failed(fixed_code("volume_delete", error)) from None
+
+
 def visible_record(step: str, call: Callable[[], Any]) -> Any:
     """Reads a record Disconnect hands over. The app SP can always see what it owns, so 403 or 404
     means the record is not its own: it was handed over before (a Disconnect, then a Reconnect that
@@ -400,19 +441,25 @@ def disconnect(ctx: Context, payload: dict[str, Any]) -> Outcome:
         if not isinstance(exposure, dict):
             raise Failed("payload_invalid")
         remove_exposure(ctx, text(exposure, "endpoint_name"), text(exposure, "provider_service"))
-    eval_job_id = payload.get("eval_job_id")
-    if isinstance(eval_job_id, int) and eval_job_id > 0:
-        permanent("jobs_delete", lambda: ws.delete_job(eval_job_id))
+    volumes = payload.get("volumes")
+    if not isinstance(volumes, list) or not all(isinstance(name, str) and name for name in volumes):
+        raise Failed("payload_invalid")
 
     # The results are the customer's records: they stay, handed to the named owner. With no
     # owner (a Disconnect from the dashboard), they stay with the app SP for an admin. A record
     # the app SP can no longer see was handed over already (a Disconnect, then a Reconnect that
-    # reused it): it is someone else's, so it is skipped (B7 smoke). A record it can see, it must
-    # hand over: any refusal there fails the item.
+    # reused it): it is someone else's, so it is skipped (B7 smoke). So is a table it can see but
+    # does not own: after a reinstall Connect gave this SP SELECT and MODIFY on a table a deleted
+    # SP or the admin's group owns, and an `OWNER TO` would fail every cleanup (Codex gate, PR #683).
+    # A table it owns, it must hand over: any refusal there fails the item.
     owner = optional_text(payload, "results_owner")
     warehouse_id = optional_text(payload, "warehouse_id")
     table = text(payload, "results_table")
-    if owner is not None and warehouse_id is not None and visible_record("table_get", lambda: ws.table_exists(table)):
+    app_principal = text(payload, "app_principal")
+    found = visible_record("table_get", lambda: ws.call("GET", f"/api/2.1/unity-catalog/tables/{table}"))
+    table_owner = found.get("owner") if isinstance(found, dict) else None
+    owns_table = isinstance(table_owner, str) and table_owner.lower() == app_principal.lower()
+    if owner is not None and warehouse_id is not None and owns_table:
         try:
             statement = f"ALTER TABLE {quote_full_name(table)} OWNER TO {quote_identifier(owner)}"
         except ValueError:
@@ -421,6 +468,12 @@ def disconnect(ctx: Context, payload: dict[str, Any]) -> Outcome:
     experiment_id = visible_record("experiment_get", lambda: ws.find_experiment(text(payload, "experiment_path")))
     if owner is not None and experiment_id is not None:
         permanent("experiment_grant", lambda: ws.grant_experiment(experiment_id, owner, "CAN_MANAGE"))
+    # Plan 4.7: after the handover, before the jobs go. A volume left behind would belong to a
+    # service principal that a reinstall deletes, and the next app's SP could not use it (B11 8b).
+    drop_volumes(ws, volumes)
+    eval_job_id = payload.get("eval_job_id")
+    if isinstance(eval_job_id, int) and eval_job_id > 0:
+        permanent("jobs_delete", lambda: ws.delete_job(eval_job_id))
 
     scope = optional_text(payload, "scope") or ctx.scope
     agent_job_id = payload.get("agent_job_id")

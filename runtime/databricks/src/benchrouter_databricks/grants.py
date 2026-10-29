@@ -1,26 +1,36 @@
 """The grants an eval needs before it runs (plan section 4.4).
 
-As the app SP, before anything starts: the agent before `run-now` on every launch. It checks exactly
-what the run will read: a refresh the folder's manifest, its cases table and its secrets
-(`check_eval`); work the frozen artifact's secrets (`check_frozen`). A run that still fails on a
-grant (one revoked in between) reports it as before, an ordinary failure. A missing grant is the customer's to
-give, so nothing runs and nothing counts as a failure: the agent reports `grant_needed` and the
-launch is cancelled with no failure, and BenchRouter checks a new launch at each poll until the grants exist.
+As the app SP, before anything starts: the agent before `run-now` on every launch. It makes exactly
+the reads the run makes: a refresh reads the folder's manifest and every file it declares, its
+cases table and its secrets, and writes BenchRouter's artifact volume (`check_eval`); work reads the
+frozen artifact from that volume and the secrets it declares (`check_frozen`). A run that still
+fails on a grant (one revoked in between) reports it as before, an ordinary failure. A missing
+grant is the workspace's to give, so nothing runs and nothing counts as a failure: the agent
+reports `grant_needed` and the launch is cancelled with no failure, and BenchRouter checks a new
+launch at each poll until the grants exist.
 
-Each check makes the cheapest call that answers the same way the run's own read would:
+Each check classifies with the answers recorded live (B11 smoke 8b, 2026-10-29,
+tests/fixtures/reinstall/answers.json):
 
-- the eval folder: export of `.benchrouter/benchrouter.yml`, the refresh's first read. A refusal
-  (403), or a folder the app SP cannot see at all, is `folder_read`. A folder it can read without
-  the manifest is the eval's own fault, not a grant: the run reports it as before;
-- the cases table: Unity Catalog `tables/get`, which answers 403 when the app SP lacks USE CATALOG,
-  USE SCHEMA or any privilege on the table, and 404 when it can see no such table. Both are
-  `table_select`. It needs no SQL warehouse, so a check never starts one;
+- the eval folder: workspace export of the manifest and each declared file, as the refresh
+  exports them. Without CAN_READ on the folder, export answers 404 RESOURCE_DOES_NOT_EXIST for
+  every file while get-status still answers 200 for the folder, so a 404 is a refused read, not a
+  missing file: the admin's Add eval read the manifest. Any 403 or 404 is `folder_read`;
+- the cases table: Unity Catalog `tables/get`, which answers 403 PERMISSION_DENIED without
+  SELECT, and 404 when the app SP can see no such table. Both are `table_select`. It needs no SQL
+  warehouse, so a check never starts one;
 - each declared secret: `secrets/list` on its scope (key names only; a check never reads a value).
-  A refused or missing scope is `secret_scope_read`; a scope without the key is
-  `secret_key_missing`.
+  A refused (403) or missing scope is `secret_scope_read`; a scope without the key is
+  `secret_key_missing`;
+- BenchRouter's artifact volume: the Files API answers 403 PERMISSION_DENIED ("does not have
+  READ VOLUME") on a volume the app SP cannot read, for example one an earlier app's SP owned.
+  That is `volume_read`, which Connect heals (plan 4.2). A 404 for a file in a readable volume is
+  a missing artifact, not a grant: the run reports it.
 
 A manifest that is unreadable for any other reason (not UTF-8, invalid YAML, the route not declared,
 a field the runner refuses) is not a grant: the check passes and the run reports it as before.
+When the manifest itself is unreadable, the check cannot name the table and secret grants too:
+BenchRouter keeps no copy of the manifest, so those show at the next check after the folder grant.
 DATA-001: a reported grant carries identifiers only, and a name outside the server's identifier
 rule is left out of the report rather than sent.
 """
@@ -66,36 +76,74 @@ def _refused(error: ApiError) -> bool:
 
 def _grant(kind: str, **names: str) -> dict[str, str]:
     """DATA-001: the server's identifier rule (src/databricks/grants.ts); a name outside it is left out."""
-    rules = {"table": _table, "scope": lambda value: _name(value, "_-.@"), "key": lambda value: _name(value, "_-.")}
+    rules = {"table": _table, "volume": _table, "scope": lambda value: _name(value, "_-.@"), "key": lambda value: _name(value, "_-.")}
     grant = {"kind": kind}
     grant.update({field: value for field, value in names.items() if rules[field](value)})
     return grant
 
 
-def read_folder_manifest(workspace: Workspace, folder: str) -> tuple[str | None, list[dict[str, str]]]:
-    """The manifest text, or None with the folder grant it needs (none when only the file is missing).
+def _export(workspace: Workspace, folder: str, path: str) -> bytes | None:
+    """One file of the eval folder as the refresh exports it, or None when the app SP is refused.
 
-    A transient error propagates, so the caller tries again later.
+    A transient error propagates, so the caller tries again later. Any other refusal than 403 or
+    404 (a file too large to export, say) is not a grant: the run reports it.
     """
     try:
-        data = workspace.export_file(f"{folder.rstrip('/')}/{MANIFEST_NAME}")
+        return workspace.export_file(f"{folder.rstrip('/')}/{path}")
+    except ApiError as error:
+        if error.transient or not _refused(error):
+            raise
+        return None
+
+
+def read_folder_manifest(workspace: Workspace, folder: str) -> tuple[str | None, list[dict[str, str]]]:
+    """The manifest text, or None with the folder grant it needs (none for a refusal that is not a grant)."""
+    try:
+        data = _export(workspace, folder, MANIFEST_NAME)
     except ApiError as error:
         if error.transient:
             raise
-        if not is_not_found(error):
-            return None, [_grant("folder_read")] if _refused(error) else []
-        # The folder itself: one the app SP cannot see is a grant; a readable one without the file is not.
-        try:
-            workspace.call("GET", "/api/2.0/workspace/get-status", query={"path": folder})
-        except ApiError as folder_error:
-            if folder_error.transient:
-                raise
-            return None, [_grant("folder_read")] if _refused(folder_error) else []
         return None, []
+    if data is None:
+        return None, [_grant("folder_read")]
     try:
         return data.decode("utf-8"), []
     except UnicodeDecodeError:
         return None, []
+
+
+def check_declared_files(workspace: Workspace, folder: str, manifest: EvalManifest) -> list[dict[str, str]]:
+    """Each file the manifest declares, exported as the refresh copies it; the first refusal is `folder_read`."""
+    for path in [*manifest.code_files, *manifest.scorer_files, manifest.requirements_lock]:
+        try:
+            if _export(workspace, folder, path) is None:
+                return [_grant("folder_read")]
+        except ApiError as error:
+            if error.transient:
+                raise
+    return []
+
+
+def check_volume(workspace: Workspace, catalog: str, schema: str) -> list[dict[str, str]]:
+    """BenchRouter's artifact volume, which a refresh writes and a work run reads (Files API listing)."""
+    root = volume_root(catalog, schema, ARTIFACT_VOLUME)
+    try:
+        workspace.call("GET", f"/api/2.0/fs/directories{urllib.parse.quote(root)}")
+    except ApiError as error:
+        if error.transient:
+            raise
+        # 404: no volume yet (Connect's setup makes it). Neither that nor another refusal is a grant.
+        return [_volume_grant(catalog, schema)] if _volume_refused(error) else []
+    return []
+
+
+def _volume_refused(error: ApiError) -> bool:
+    """The recorded refusal of a volume without READ VOLUME: 403 PERMISSION_DENIED."""
+    return error.status == 403
+
+
+def _volume_grant(catalog: str, schema: str) -> dict[str, str]:
+    return _grant("volume_read", volume=f"{catalog}.{schema}.{ARTIFACT_VOLUME}")
 
 
 def check_table(workspace: Workspace, table: str) -> list[dict[str, str]]:
@@ -138,25 +186,31 @@ def parsed_manifest(text: str, route_key: str, own_scope: str) -> EvalManifest |
         return None
 
 
-def check_eval(workspace: Workspace, folder: str, route_key: str, own_scope: str) -> list[dict[str, str]]:
-    """Every grant the eval folder's manifest declares: the folder, the cases table, each secret."""
+def check_eval(workspace: Workspace, folder: str, route_key: str, own_scope: str, catalog: str | None = None,
+               schema: str | None = None) -> list[dict[str, str]]:
+    """What a refresh reads and writes: the folder's manifest and its files, the cases table, each
+    secret, and BenchRouter's artifact volume (when the payload names the binding's schema)."""
+    volume = [] if catalog is None or schema is None else check_volume(workspace, catalog, schema)
     text, missing = read_folder_manifest(workspace, folder)
     if text is None:
-        return missing
+        return [*missing, *volume]
     manifest = parsed_manifest(text, route_key, own_scope)
     if manifest is None:
-        return []
-    return [*check_table(workspace, manifest.cases_table), *check_secrets(workspace, manifest.secrets)]
+        return volume
+    return [*check_declared_files(workspace, folder, manifest), *check_table(workspace, manifest.cases_table),
+            *check_secrets(workspace, manifest.secrets), *volume]
 
 
 def check_frozen(workspace: Workspace, catalog: str, schema: str, digest: str, route_key: str, own_scope: str) -> list[dict[str, str]]:
-    """Each declared secret of a frozen artifact's manifest: what a work run reads (runner.py).
+    """The frozen artifact's manifest in BenchRouter's volume, and each secret it declares: what a work
+    run reads (runner.py).
 
-    The work run reads no folder and no table, only its artifact in the app SP's own volume and
-    the secrets that artifact declares, so a work launch checks exactly that. The manifest is read
-    through the Files API without its proof only to name the secrets; the
-    item proves the whole artifact after its claim. A manifest that is missing or unreadable is
-    not a grant: the item reports it.
+    The work run reads no folder and no table, only its artifact in the artifact volume and the
+    secrets that artifact declares, so a work launch checks exactly that. A volume the app SP may not
+    read answers 403 (`volume_read`). B11 smoke 8b: the 0.2.2 check passed that 403 as "not a grant",
+    and every work run then failed `tree_mutated`. The manifest is read through the Files API
+    without its proof only to name the secrets; the item proves the whole artifact after its claim.
+    A manifest that is missing (404) or unreadable is not a grant: the run reports it.
     """
     path = f"{volume_root(catalog, schema, ARTIFACT_VOLUME)}/{digest}/files/{MANIFEST_NAME}"
     try:
@@ -164,7 +218,7 @@ def check_frozen(workspace: Workspace, catalog: str, schema: str, digest: str, r
     except ApiError as error:
         if error.transient:
             raise
-        return []
+        return [_volume_grant(catalog, schema)] if _volume_refused(error) else []
     if data is None:
         return []
     try:

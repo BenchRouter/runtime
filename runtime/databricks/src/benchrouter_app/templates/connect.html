@@ -9,9 +9,15 @@
   <p>Databricks refused this grant:</p>
   <pre>{{ refusal.statement }}</pre>
   <p>{{ refusal.message }}</p>
+  {% if refusal.hint %}
+  <p>Its owner:</p>
+  <ul>{% for kind, name, owner in refusal.owners %}<li>{{ kind }} <code>{{ name }}</code>: {{ owner }}</li>{% endfor %}</ul>
+  <p>{{ refusal.hint }}</p>
+  {% else %}
   <p>You need to own, or hold MANAGE on, both the catalog and the schema. Their owners:</p>
   <ul>{% for kind, name, owner in refusal.owners %}<li>{{ kind }} <code>{{ name }}</code>: {{ owner }}</li>{% endfor %}</ul>
   <p>Ask an owner to open this app and click Connect, or choose a schema you own. Any workspace admin can grant on schemas in the <code>workspace</code> catalog.</p>
+  {% endif %}
 </div>
 {% endif %}
 

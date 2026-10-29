@@ -18,6 +18,9 @@ from benchrouter_databricks.workspace import Workspace
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "handover" / "visible_table_owner_refused.json").read_text())
 TABLE = FIXTURE["table_get"]["full_name"]
+#: The B7 app SP made the table, so it owned it; the recording kept no `owner` field, so it is added here.
+APP_SP = "6f1c2b0e-1d2a-4c3b-9e8f-0a1b2c3d4e5f"
+TABLE_GET = {**FIXTURE["table_get"], "owner": APP_SP}
 
 
 class RecordedWorkspace(BaseHTTPRequestHandler):
@@ -36,7 +39,7 @@ class RecordedWorkspace(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         self.calls.append(("GET", self.path))
         if self.path == f"/api/2.1/unity-catalog/tables/{TABLE}":
-            self._answer(200, FIXTURE["table_get"])
+            self._answer(200, TABLE_GET)
         else:
             self._answer(404, {"error_code": "RESOURCE_DOES_NOT_EXIST"})
 
@@ -68,7 +71,7 @@ class DisconnectHandoverTest(unittest.TestCase):
         payload = {
             "results_owner": "br-b7-no-such-group", "warehouse_id": "recorded", "results_table": TABLE,
             "experiment_path": "/Shared/benchrouter/recorded", "scope": "benchrouter", "agent_job_id": 99,
-            "exposures": [], "cancel_runs": [],
+            "exposures": [], "cancel_runs": [], "volumes": ["workspace.br_b7.benchrouter_artifacts"], "app_principal": APP_SP,
         }
         with self.assertRaises(Failed) as refused:
             disconnect(self.ctx, payload)

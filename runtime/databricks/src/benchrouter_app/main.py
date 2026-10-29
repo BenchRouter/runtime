@@ -314,6 +314,10 @@ def status(session: Session):
         if entry.get("grant_needed") is None:
             try:
                 workspace_ops.read_manifest(app_sp, entry["eval_folder"], entry["route_key"])
+            except workspace_ops.ManifestMissing:
+                # B11 smoke 8b: without Can Read on the folder, export answers 404 for every file.
+                manifest_error = ("The app's service principal cannot read .benchrouter/benchrouter.yml in this folder. "
+                                  "Add the eval again to share the folder with it, or restore the file.")
             except workspace_ops.ManifestInvalid as invalid:
                 manifest_error = str(invalid)
             except ApiError:

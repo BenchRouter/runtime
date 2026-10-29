@@ -21,15 +21,25 @@ import sysconfig
 from typing import Any
 
 from .canonical import file_digest, sha256_canonical
+from .workspace import ARTIFACT_VOLUME, RESULTS_VOLUME
 
 FORMAT = "benchrouter.databricks.artifact.v1"
-ARTIFACT_VOLUME = "benchrouter_artifacts"
-RESULTS_VOLUME = "benchrouter_results"
 API_FAMILY = "openai_chat_completions"
 
 
 class TreeMutated(Exception):
     """A copied file or the digest does not match the planned artifact."""
+
+
+class ArtifactMissing(Exception):
+    """The planned artifact is not in the volume (a Disconnect dropped it, say): not a mismatch."""
+
+
+class VolumeRefused(Exception):
+    """The app SP may not read or write BenchRouter's volume (no READ VOLUME): a grant, not the eval.
+
+    Through the volume's FUSE mount the Files API's 403 arrives as PermissionError (B11 smoke 8b).
+    """
 
 
 def volume_root(catalog: str, schema: str, volume: str) -> str:
@@ -64,7 +74,7 @@ def publish(local_root: str, artifact: dict[str, Any], volume: str) -> str:
     digest = artifact_digest(artifact["python_version"], artifact["platform_tag"], artifact["files"])
     target = os.path.join(volume, digest)
     marker = os.path.join(target, "artifact.json")
-    if os.path.exists(marker):
+    if _exists(marker):
         # Content-addressed: an artifact frozen before (A -> B -> A) is reused, never rewritten.
         verify_copy(target, digest)
         return digest
@@ -98,10 +108,28 @@ def verify_copy(root: str, digest: str) -> dict[str, Any]:
     return artifact
 
 
+def _exists(path: str) -> bool:
+    """Like `os.path.exists`, but a refused read raises VolumeRefused instead of reading as absent."""
+    try:
+        os.stat(path)
+    except FileNotFoundError:
+        return False
+    except PermissionError:
+        raise VolumeRefused(path) from None
+    return True
+
+
 def copy_planned(volume: str, digest: str, destination: str) -> dict[str, Any]:
-    """Copies `<volume>/<digest>/` into a private directory and verifies every file there."""
+    """Copies `<volume>/<digest>/` into a private directory and verifies every file there.
+
+    Raises ArtifactMissing when the artifact is not there, VolumeRefused when the app SP may not
+    read the volume, and TreeMutated when a copied file or the digest does not match.
+    """
     source = os.path.join(volume, digest)
-    if not os.path.exists(os.path.join(source, "artifact.json")):
-        raise TreeMutated("missing")
-    shutil.copytree(source, destination)
+    if not _exists(os.path.join(source, "artifact.json")):
+        raise ArtifactMissing(digest)
+    try:
+        shutil.copytree(source, destination)
+    except PermissionError:
+        raise VolumeRefused(source) from None
     return verify_copy(destination, digest)
