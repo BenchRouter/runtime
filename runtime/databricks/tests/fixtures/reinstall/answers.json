@@ -1,0 +1,88 @@
+{
+  "_source": "B11 smoke 8b, 2026-10-29, test workspace, release 0.2.2: a reinstall. Disconnect with br-b11-app (results owner nav@benchrouter.com), delete that app (its SP goes), install br-b11-app2 (new SP 4d9ee9dd-3c40-43c3-8e7a-fd45442f3466, display name 'app-1vmkr0 br-b11-app2'), Connect on workspace.br_b11. Recorded by job runs that ran as the new SP (probe runs 990896844118553 and 69165261363365) and as the workspace admin. Status, error_code and message are verbatim. Success bodies were recorded by status (and owner) only, so a success body here holds only the fields the code reads. The admin probe printed a volume whose owner SP was deleted as owner 'unknown'. No case content.",
+  "app_principal": "4d9ee9dd-3c40-43c3-8e7a-fd45442f3466",
+  "export_unshared": {
+    "status": 404,
+    "body": {
+      "error_code": "RESOURCE_DOES_NOT_EXIST",
+      "message": "Path (/Workspace/Users/nav@benchrouter.com/br-b11-eval-new/.benchrouter/benchrouter.yml) doesn't exist."
+    }
+  },
+  "folder_status_unshared": {
+    "status": 200,
+    "body": {}
+  },
+  "cases_table_no_select": {
+    "status": 403,
+    "body": {
+      "error_code": "PERMISSION_DENIED",
+      "message": "Principal 'app-1vmkr0 br-b11-app2' does not have SELECT on Table 'workspace.br_b11.br_b11_cases_new'."
+    }
+  },
+  "results_table_no_select": {
+    "status": 403,
+    "body": {
+      "error_code": "PERMISSION_DENIED",
+      "message": "Principal 'app-1vmkr0 br-b11-app2' does not have SELECT on Table 'workspace.br_b11.benchrouter_eval_results'."
+    }
+  },
+  "scope_no_read": {
+    "status": 403,
+    "body": {
+      "error_code": "PERMISSION_DENIED",
+      "message": "User 4d9ee9dd-3c40-43c3-8e7a-fd45442f3466 does not have secret-scopes.secrets/list permission on scope br-b11-cust to perform this action."
+    }
+  },
+  "volume_get_no_read": {
+    "status": 403,
+    "body": {
+      "error_code": "PERMISSION_DENIED",
+      "message": "Principal 'app-1vmkr0 br-b11-app2' does not have READ VOLUME on Volume 'workspace.br_b11.benchrouter_artifacts'."
+    }
+  },
+  "files_no_read": {
+    "status": 403,
+    "body": {
+      "error_code": "PERMISSION_DENIED",
+      "message": "Principal 'app-1vmkr0 br-b11-app2' does not have READ VOLUME on Volume 'workspace.br_b11.br_b11_probe_vol'."
+    }
+  },
+  "files_missing": {
+    "status": 404,
+    "body": {
+      "error_code": "NOT_FOUND",
+      "message": "The file being accessed is not found."
+    }
+  },
+  "files_list_readable": {
+    "status": 200,
+    "body": {}
+  },
+  "admin_volume_owner_gone": {
+    "status": 200,
+    "body": {
+      "owner": "unknown"
+    }
+  },
+  "admin_volume_owner_healed": {
+    "status": 200,
+    "body": {
+      "owner": "4d9ee9dd-3c40-43c3-8e7a-fd45442f3466"
+    }
+  },
+  "admin_results_table_owner": {
+    "status": 200,
+    "body": {
+      "owner": "nav@benchrouter.com"
+    }
+  },
+  "statement_succeeded": {
+    "status": 200,
+    "body": {
+      "statement_id": "recorded-statement",
+      "status": {
+        "state": "SUCCEEDED"
+      }
+    }
+  }
+}

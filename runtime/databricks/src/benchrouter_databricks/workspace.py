@@ -10,6 +10,11 @@ from typing import Any, Callable
 
 from .transport import TIMEOUT_SECONDS, USER_AGENT, ApiError, _api_error, request_json, send
 
+#: BenchRouter's two working volumes in the binding's schema (plan 4.4, 4.5): the frozen artifacts
+#: and the runner's hand-off to the results task. Connect heals them and Disconnect drops them.
+ARTIFACT_VOLUME = "benchrouter_artifacts"
+RESULTS_VOLUME = "benchrouter_results"
+
 NOT_FOUND_CODES = {"RESOURCE_DOES_NOT_EXIST", "NOT_FOUND", "TABLE_OR_VIEW_NOT_FOUND", "ENDPOINT_NOT_FOUND"}
 STATEMENT_WAIT_SECONDS = 300
 
@@ -189,15 +194,6 @@ class Workspace:
         except ApiError as error:
             if not is_already_exists(error):
                 raise
-
-    def table_exists(self, full_name: str) -> bool:
-        try:
-            self.call("GET", f"/api/2.1/unity-catalog/tables/{full_name}")
-            return True
-        except ApiError as error:
-            if is_not_found(error):
-                return False
-            raise
 
     def execute_sql(self, warehouse_id: str, statement: str, parameters: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         """Runs one statement and waits for it. A failed statement raises StatementFailed."""

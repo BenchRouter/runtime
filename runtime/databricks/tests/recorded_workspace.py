@@ -48,7 +48,7 @@ class RecordedServer:
                 self.end_headers()
                 self.wfile.write(data)
 
-            do_GET = do_POST = do_PATCH = _serve  # noqa: N815
+            do_GET = do_POST = do_PATCH = do_DELETE = _serve  # noqa: N815
 
             def log_message(self, format: str, *args: object) -> None:
                 pass

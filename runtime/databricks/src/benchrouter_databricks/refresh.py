@@ -22,7 +22,7 @@ import sys
 import tempfile
 from typing import Any
 
-from .artifact import API_FAMILY, ARTIFACT_VOLUME, FORMAT, artifact_digest, hash_tree, platform_tag, publish, python_version, volume_root
+from .artifact import API_FAMILY, ARTIFACT_VOLUME, FORMAT, VolumeRefused, artifact_digest, hash_tree, platform_tag, publish, python_version, volume_root
 from .canonical import canonical_json
 from .manifest import MANIFEST_NAME, EvalManifest, ManifestError, load_manifest
 from .transport import ApiError, TransportError, with_retries
@@ -219,7 +219,11 @@ def run_refresh(workspace: Workspace, folder: str, route_key: str, warehouse_id:
     with tempfile.TemporaryDirectory(prefix="benchrouter-refresh-") as root:
         try:
             artifact, _ = build_artifact(workspace, folder, route_key, warehouse_id, scope, root)
-            digest = publish(root, artifact, volume_root(catalog, schema, ARTIFACT_VOLUME))
+            try:
+                digest = publish(root, artifact, volume_root(catalog, schema, ARTIFACT_VOLUME))
+            except (VolumeRefused, PermissionError):
+                # BenchRouter's artifact volume refused the app SP: a grant Connect heals, not the eval's fault.
+                return {"kind": "databricks_unavailable", "cause": "artifact_volume_refused"}
         except RefreshFailed as failure:
             return {"kind": "databricks_unavailable", "cause": failure.cause}
         except OSError:

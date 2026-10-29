@@ -34,7 +34,8 @@ from typing import Any
 
 from . import __version__
 from .agent import parse_args
-from .artifact import ARTIFACT_VOLUME, RESULTS_VOLUME, TreeMutated, copy_planned, platform_tag, python_version, volume_root
+from .artifact import (ARTIFACT_VOLUME, RESULTS_VOLUME, ArtifactMissing, TreeMutated, VolumeRefused, copy_planned, platform_tag,
+                       python_version, volume_root)
 from .canonical import canonical_json, sha256_digest
 from .child import Masker, child_env, run_child
 from .manifest import MANIFEST_NAME, ManifestError, load_manifest
@@ -306,10 +307,18 @@ class Runner:
             raise ItemFault("capability_unsupported", "trials_unsupported")
         deadline_at = parse_time(item["work_deadline_at"])
 
-        # Copy the planned artifact into the private directory and prove every file.
+        # Copy the planned artifact into the private directory and prove every file. Only a copy that
+        # does not match its digest is `tree_mutated`. A volume the app SP may not read (B11 smoke 8b:
+        # a reinstall's new SP, before Connect healed the volume) and an artifact that is gone are not
+        # the eval's fault: each has its own fixed reason, which BenchRouter shows as its own or as
+        # Connect's to fix (src/shared/failure-display.ts), never as "fix the eval".
         tree = os.path.join(private, "artifact")
         try:
             artifact = copy_planned(volume_root(self.catalog, self.schema, ARTIFACT_VOLUME), str(hello["eval_sha"]), tree)
+        except VolumeRefused:
+            raise ItemFault("harness_failed", "artifact_unreadable") from None
+        except ArtifactMissing:
+            raise ItemFault("harness_failed", "artifact_missing") from None
         except (TreeMutated, OSError):
             raise ItemFault("tree_mutated", "artifact_mismatch") from None
         files_root = os.path.join(tree, "files")

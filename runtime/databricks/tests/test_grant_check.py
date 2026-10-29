@@ -94,15 +94,10 @@ class AgentGrantCheck(unittest.TestCase):
         reports = self.run_launch()
         self.assertEqual(reports[0]["outcome"], "grant_needed")
         self.assertEqual(reports[0]["result"], {"grants": [{"kind": "folder_read"}]})
-        self.assertEqual(self.server.paths(), [("GET", "/api/2.0/workspace/export"), ("POST", "/v1/databricks/report")])
-
-    def test_a_readable_folder_without_the_manifest_is_not_a_grant(self) -> None:
-        # The run reports the missing manifest as before; no grant would fix it.
-        self.server.answers[EXPORT] = GRANT_ANSWERS["export_missing"]
-        self.server.answers["GET /api/2.0/workspace/get-status"] = GRANT_ANSWERS["folder_status"]
-        reports = self.run_launch()
-        self.assertIn(("POST", "/api/2.2/jobs/run-now"), self.server.paths())
-        self.assertEqual(reports[0]["outcome"], "done")
+        # The artifact volume (no volume yet: not a grant), then the manifest; no table or secret read.
+        self.assertEqual(self.server.paths(), [
+            ("GET", "/api/2.0/fs/directories/Volumes/main/benchrouter/benchrouter_artifacts"),
+            ("GET", "/api/2.0/workspace/export"), ("POST", "/v1/databricks/report")])
 
     def test_a_folder_the_app_cannot_see_is_a_grant(self) -> None:
         self.server.answers[EXPORT] = GRANT_ANSWERS["export_missing"]

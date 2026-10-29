@@ -17,11 +17,13 @@ HANDOVER = json.loads((Path(__file__).parent / "fixtures" / "handover" / "visibl
 SUCCEEDED = {"status": 200, "body": {"statement_id": "recorded", "status": {"state": "SUCCEEDED"}}}
 REFUSED = {"status": 200, "body": HANDOVER["owner_statement"]}
 TABLE = "workspace.br-b11.benchrouter_eval_results"
+APP_SP = "6f1c2b0e-1d2a-4c3b-9e8f-0a1b2c3d4e5f"
 
 
 class ResultsReaders(unittest.TestCase):
     def setUp(self) -> None:
-        self.server = RecordedServer({})
+        # The app SP made the table, so it owns it and grants its readers.
+        self.server = RecordedServer({f"GET /api/2.1/unity-catalog/tables/{TABLE}": {"status": 200, "body": {"owner": APP_SP}}})
         self.ctx = Context(self.server.workspace(), "benchrouter", 99)
 
     def tearDown(self) -> None:
@@ -31,7 +33,7 @@ class ResultsReaders(unittest.TestCase):
         return [body["statement"] for method, path, _, body in self.server.calls if path == "/api/2.0/sql/statements"]
 
     def payload(self, readers: list[str]) -> dict:
-        return {"object": "results_table", "table": TABLE, "warehouse_id": "recorded",
+        return {"object": "results_table", "table": TABLE, "warehouse_id": "recorded", "app_principal": APP_SP,
                 "columns": [{"name": "written_at", "type": "TIMESTAMP"}], "read_principals": readers}
 
     def test_every_reader_gets_select(self) -> None:

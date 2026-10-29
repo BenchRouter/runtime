@@ -17,7 +17,8 @@ from typing import Any
 from benchrouter_databricks import handlers
 from benchrouter_databricks.manifest import EvalManifest, ManifestError, load_manifest
 from benchrouter_databricks.transport import ApiError
-from benchrouter_databricks.workspace import Workspace, is_not_found, quote_full_name, quote_identifier, split_full_name
+from benchrouter_databricks.workspace import (ARTIFACT_VOLUME, RESULTS_VOLUME, Workspace, is_not_found, quote_full_name, quote_identifier,
+                                              split_full_name)
 
 from . import api, identity, store
 
@@ -27,6 +28,15 @@ AGENT_ENVIRONMENT = "agent"
 #: The eval folder's manifest: the same file and schema as a repo's, so one folder works on either runner.
 EVAL_MANIFEST = ".benchrouter/benchrouter.yml"
 STATEMENT_WAIT_SECONDS = 90
+
+
+#: Where Unity Catalog reads each securable kind the app names an owner of.
+UC_PATHS = {"catalog": "catalogs", "schema": "schemas", "table": "tables", "volume": "volumes"}
+#: Plan 4.2: why a heal statement was refused, beside its owner (the Connect screen shows it).
+HEAL_HINT = ("BenchRouter's volumes and results table in this schema belong to someone else: an earlier BenchRouter app's "
+             "service principal, or the group a Disconnect handed the results to. Connect gives this app's service principal "
+             "the use of them, as you. Ask the owner named here, or a metastore admin, to open this app and click Connect, or "
+             "to run the statement above.")
 
 
 class SqlRefused(Exception):
@@ -44,6 +54,8 @@ class GrantRefusal:
     message: str
     #: (kind, name, owner) for each securable the statement names, so the admin knows whom to ask.
     owners: list[tuple[str, str, str]] = field(default_factory=list)
+    #: What to do, when it is not the default (own or hold MANAGE on the catalog and the schema).
+    hint: str | None = None
 
 
 def run_statement(workspace: Workspace, warehouse_id: str, statement: str) -> None:
@@ -66,12 +78,53 @@ def run_statement(workspace: Workspace, warehouse_id: str, statement: str) -> No
 
 
 def owner_of(workspace: Workspace, kind: str, full_name: str) -> str:
-    """The owner field of a catalog or schema, as the admin can read it."""
-    path = {"catalog": "catalogs", "schema": "schemas", "table": "tables"}[kind]
+    """The owner field of a securable, as the admin can read it."""
     try:
-        return str(workspace.call("GET", f"/api/2.1/unity-catalog/{path}/{full_name}").get("owner") or "unknown")
+        return str(workspace.call("GET", f"/api/2.1/unity-catalog/{UC_PATHS[kind]}/{full_name}").get("owner") or "unknown")
     except ApiError:
         return "unknown"
+
+
+def _present_owner(user: Workspace, kind: str, name: str) -> tuple[bool, str | None]:
+    """Whether a securable exists, as the admin reads it, and its owner when the read shows one.
+
+    A read the admin may not make (403) is taken as present with no owner, so the statement still runs
+    and its own refusal names the owner. A transient error propagates: the page reloads.
+    """
+    try:
+        answer = user.call("GET", f"/api/2.1/unity-catalog/{UC_PATHS[kind]}/{name}")
+    except ApiError as error:
+        if error.transient:
+            raise
+        return (False, None) if is_not_found(error) else (True, None)
+    owner = answer.get("owner") if isinstance(answer, dict) else None
+    return True, owner if isinstance(owner, str) and owner else None
+
+
+def heal_reinstall(user: Workspace, warehouse_id: str, heals: list[dict[str, str]], app_principal: str) -> GrantRefusal | None:
+    """Plan 4.2: after a reinstall, gives this app's SP the use of what BenchRouter left in the schema.
+
+    Unity Catalog keeps a volume and a table when the SP that made them is deleted, and Disconnect
+    hands the results table to the admin's group, so a new app's SP finds objects it cannot use
+    (B11 smoke 8b: `volume_http_403` at setup, then every work run failed). As the connecting admin,
+    each heal the server returns runs only for an object that exists and that this SP does not own:
+    `ALTER VOLUME ... OWNER TO` for BenchRouter's two working volumes (its scratch), and `GRANT
+    SELECT, MODIFY` on a results table someone else owns (the customer's record keeps its owner).
+    The admin's recorded probe ran both on a volume whose owner was gone and on a table the admin's
+    account owned. A refused statement shows its owner, unless the object is gone by then.
+    """
+    for heal in heals:
+        kind, name, statement = heal["securable"], heal["name"], heal["statement"]
+        present, owner = _present_owner(user, kind, name)
+        if not present or (owner is not None and owner.lower() == app_principal.lower()):
+            continue
+        try:
+            run_statement(user, warehouse_id, statement)
+        except SqlRefused as refused:
+            if not _present_owner(user, kind, name)[0]:
+                continue
+            return GrantRefusal(statement, refused.message, [(kind, name, owner_of(user, kind, name))], HEAL_HINT)
+    return None
 
 
 def run_grants(user: Workspace, warehouse_id: str, statements: list[str], securables: list[tuple[str, str]]) -> GrantRefusal | None:
@@ -131,6 +184,8 @@ def connect(token: str, user: Workspace, admin_user_name: str, catalog: str, sch
     app.secret_put(scope, f"{agent['poll_key_secret']}-{secrets.token_hex(8)}", str(registered["poll_key"]))
     refusal = run_grants(user, warehouse_id, registered["grants"]["statements"],
                          [("catalog", catalog), ("schema", f"{catalog}.{schema}")])
+    if refusal is None:
+        refusal = heal_reinstall(user, warehouse_id, registered["grants"]["heal"], identity.app_sp_client_id())
     if refusal is not None:
         return ConnectResult(binding_id, refusal)
 
@@ -198,12 +253,14 @@ def remove_agent(app: Workspace, binding: dict[str, Any], exposures: list[dict[s
     """After a Disconnect that closed at once (no agent ran the cleanup): the app SP deletes what
     the agent's `disconnect` would have deleted, with the agent's own code (plan section 4.7).
 
-    Records stay: the results table and the experiment keep their owner. Each step treats an
-    object already gone as deleted, so a repeat is safe.
+    Records stay: the results table and the experiment keep their owner. BenchRouter's two working
+    volumes go, as the agent's Disconnect drops them. Each step treats an object already gone as
+    deleted, so a repeat is safe.
     """
     for exposure in exposures:
         handlers.remove_exposure(handlers.Context(app, store.SCOPE, None),
                                  str(exposure["endpoint_name"]), str(exposure["provider_service_name"]))
+    handlers.drop_volumes(app, [f"{binding['catalog']}.{binding['schema']}.{name}" for name in (ARTIFACT_VOLUME, RESULTS_VOLUME)])
     eval_job_id = binding.get("eval_job_id")
     if eval_job_id is not None:
         app.delete_job(int(eval_job_id))
@@ -218,6 +275,10 @@ class ManifestInvalid(Exception):
     pass
 
 
+class ManifestMissing(ManifestInvalid):
+    """Export answered not found. As the app SP that is also a folder it may not read (B11 smoke 8b)."""
+
+
 def read_manifest(workspace: Workspace, folder: str, route_key: str) -> EvalManifest:
     """Reads the route's entry of `<folder>/.benchrouter/benchrouter.yml` with the runner's own parser.
 
@@ -230,7 +291,7 @@ def read_manifest(workspace: Workspace, folder: str, route_key: str) -> EvalMani
         answer = workspace.call("GET", "/api/2.0/workspace/export", query={"path": path, "format": "SOURCE"})
     except ApiError as error:
         if is_not_found(error):
-            raise ManifestInvalid(f"{path} was not found.") from None
+            raise ManifestMissing(f"{path} was not found.") from None
         raise
     try:
         text = base64.b64decode(answer.get("content") or "").decode("utf-8")
