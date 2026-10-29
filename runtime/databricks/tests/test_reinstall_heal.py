@@ -143,50 +143,113 @@ class ResultsTableOwnedByTheCustomer(unittest.TestCase):
         self.assertTrue(self.statements()[0].startswith("CREATE TABLE IF NOT EXISTS"))
 
 
+#: Live, 2026-10-29: a probe app with exactly the product app's user API scopes, called through the
+#: Apps proxy, on a schema a reinstall left (br_b11) and on one an install connected (br_b11_fresh).
+#: `obo` is the admin's forwarded token, `sp` the app's own. Each entry is one call, kept verbatim.
+PROBE = {schema: json.loads((Path(__file__).parent / "fixtures" / "reinstall" / f"probeapp_{schema}.json").read_text())
+         for schema in ("br_b11", "br_b11_fresh")}
+
+
+def rest_answer(entry: dict) -> dict:
+    """A probe entry of a REST call, as the answer it recorded."""
+    return {"status": entry["status"], "body": {name: entry[name] for name in ("error_code", "message", "owner", "full_name") if name in entry}}
+
+
+def sql_answer(entry: dict) -> dict:
+    """A probe entry of a SQL statement, as the Statement Execution API answered it (JSON_ARRAY rows)."""
+    status: dict = {"state": entry["state"]}
+    if entry["state"] != "SUCCEEDED":
+        status["error"] = {"error_code": entry["error_code"], "message": entry["message"]}
+    return {"status": 200, "body": {"statement_id": "probe", "status": status, "result": {"data_array": entry["rows"] or []}}}
+
+
 class ConnectHealsAsTheAdmin(unittest.TestCase):
-    """Plan 4.2: the app's Connect runs the server's heal statements as the admin, only where needed."""
+    """Plan 4.2: the app's Connect runs the server's heal statements as the admin, only where needed.
 
-    def setUp(self) -> None:
+    The app reads volumes with SQL on the admin's `sql` scope: its OBO token has no `catalog.volumes`
+    scope, so a Unity Catalog volume read answers 403 for a volume that exists and for one that does
+    not. 0.2.3 took that 403 for "present", ran ALTER VOLUME on a missing volume and refused Connect.
+    Each SQL answer is picked by the statement's text."""
+
+    def serve(self, schema: str, show_volumes: dict, describe: dict, results_table: dict) -> None:
+        obo = PROBE[schema]["obo"]
+        self.sql = {
+            f"SHOW VOLUMES IN `workspace`.`{schema}`": show_volumes,
+            f"DESCRIBE VOLUME `workspace`.`{schema}`.`benchrouter_artifacts`": describe,
+            f"DESCRIBE VOLUME `workspace`.`{schema}`.`benchrouter_results`": describe,
+        }
         self.server = RecordedServer({
-            f"GET /api/2.1/unity-catalog/volumes/{ARTIFACTS}": LIVE["admin_volume_owner_gone"],
-            f"GET /api/2.1/unity-catalog/volumes/{RESULTS_VOLUME}": LIVE["admin_volume_owner_healed"],
-            f"GET /api/2.1/unity-catalog/tables/{RESULTS_TABLE}": LIVE["admin_results_table_owner"],
-            STATEMENTS: LIVE["statement_succeeded"],
+            f"GET /api/2.1/unity-catalog/volumes/workspace.{schema}.benchrouter_artifacts": rest_answer(obo["volume_get_artifacts"]),
+            f"GET /api/2.1/unity-catalog/volumes/workspace.{schema}.benchrouter_results": rest_answer(obo["volume_get_missing"]),
+            f"GET /api/2.1/unity-catalog/tables/workspace.{schema}.benchrouter_eval_results": results_table,
+            STATEMENTS: lambda body: self.sql.get(body["statement"], LIVE["statement_succeeded"]),
         })
+        self.addCleanup(self.server.close)
         self.heals = [
-            {"securable": "volume", "name": ARTIFACTS, "statement": f"ALTER VOLUME `workspace`.`br_b11`.`benchrouter_artifacts` OWNER TO `{APP_SP}`"},
-            {"securable": "volume", "name": RESULTS_VOLUME, "statement": f"ALTER VOLUME `workspace`.`br_b11`.`benchrouter_results` OWNER TO `{APP_SP}`"},
-            {"securable": "table", "name": RESULTS_TABLE,
-             "statement": f"GRANT SELECT, MODIFY ON TABLE `workspace`.`br_b11`.`benchrouter_eval_results` TO `{APP_SP}`"},
-        ]
-
-    def tearDown(self) -> None:
-        self.server.close()
+            {"securable": "volume", "name": f"workspace.{schema}.{volume}",
+             "statement": f"ALTER VOLUME `workspace`.`{schema}`.`{volume}` OWNER TO `{APP_SP}`"}
+            for volume in ("benchrouter_artifacts", "benchrouter_results")
+        ] + [{"securable": "table", "name": f"workspace.{schema}.benchrouter_eval_results",
+              "statement": f"GRANT SELECT, MODIFY ON TABLE `workspace`.`{schema}`.`benchrouter_eval_results` TO `{APP_SP}`"}]
 
     def statements(self) -> list[str]:
         return [body["statement"] for _, path, _, body in self.server.calls if path == "/api/2.0/sql/statements"]
 
-    def test_only_objects_that_exist_and_are_not_the_app_sps_are_healed(self) -> None:
-        refusal = workspace_ops.heal_reinstall(self.server.workspace(), "recorded", self.heals, APP_SP)
-        self.assertIsNone(refusal)
-        # The results volume already belongs to the new SP; the artifacts volume's owner is gone.
-        self.assertEqual(self.statements(), [self.heals[0]["statement"], self.heals[2]["statement"]])
+    def heal_statements(self) -> list[str]:
+        return [statement for statement in self.statements() if not statement.startswith(("SHOW ", "DESCRIBE "))]
 
-    def test_a_first_connect_runs_nothing(self) -> None:
-        for path in list(self.server.answers):
-            if path.startswith("GET "):
-                del self.server.answers[path]  # every read answers 404: nothing exists yet
+    def test_a_fresh_install_runs_no_heal_statement(self) -> None:
+        # A schema with no BenchRouter volumes and no results table: the live SHOW VOLUMES answer with no
+        # rows, and the live 404 of a missing table. The OBO volume read would answer 403 either way.
+        obo = PROBE["br_b11_fresh"]["obo"]
+        none = sql_answer({**obo["sql_show_volumes"], "rows": []})
+        self.serve("br_b11_fresh", none, sql_answer(obo["sql_describe_volume_missing"]), rest_answer(obo["table_get_missing"]))
+        self.sql[self.heals[0]["statement"]] = sql_answer(obo["sql_alter_missing_volume"])
         self.assertIsNone(workspace_ops.heal_reinstall(self.server.workspace(), "recorded", self.heals, APP_SP))
-        self.assertEqual(self.statements(), [])
+        self.assertEqual(self.heal_statements(), [])
+        self.assertEqual(self.statements(), ["SHOW VOLUMES IN `workspace`.`br_b11_fresh`"] * 2)
+        self.assertFalse(any(path.startswith("/api/2.1/unity-catalog/volumes/") for _, path in self.server.paths()))
 
-    def test_a_refused_heal_names_the_owner_and_the_statement(self) -> None:
-        self.server.answers[STATEMENTS] = {"status": 200, "body": {"statement_id": "refused", "status": {
-            "state": "FAILED", "error": {"error_code": "PERMISSION_DENIED", "message": "User does not have MANAGE on Table."}}}}
-        refusal = workspace_ops.heal_reinstall(self.server.workspace(), "recorded", self.heals[2:], APP_SP)
-        assert refusal is not None
-        self.assertEqual(refusal.statement, self.heals[2]["statement"])
-        self.assertEqual(refusal.owners, [("table", RESULTS_TABLE, "nav@benchrouter.com")])
-        self.assertEqual(refusal.hint, workspace_ops.HEAL_HINT)
+    def test_a_reconnect_of_the_same_app_runs_no_heal_statement(self) -> None:
+        # br_b11_fresh, live: the volumes and the results table belong to the app SP that connected it.
+        obo = PROBE["br_b11_fresh"]["obo"]
+        self.serve("br_b11_fresh", sql_answer(obo["sql_show_volumes"]), sql_answer(obo["sql_describe_volume"]), rest_answer(obo["table_get_results"]))
+        owner = obo["sql_describe_volume"]["rows"][0][3]
+        self.assertIsNone(workspace_ops.heal_reinstall(self.server.workspace(), "recorded", self.heals, owner))
+        self.assertEqual(self.heal_statements(), [])
+
+    def test_a_reinstall_heals_the_volumes_and_the_table_another_principal_owns(self) -> None:
+        # br_b11, live: the volumes belong to an earlier app SP and the results table to the admin.
+        # The probe described benchrouter_artifacts only; the results volume reuses that answer.
+        obo = PROBE["br_b11"]["obo"]
+        self.serve("br_b11", sql_answer(obo["sql_show_volumes"]), sql_answer(obo["sql_describe_volume"]), rest_answer(obo["table_get_results"]))
+        self.assertIsNone(workspace_ops.heal_reinstall(self.server.workspace(), "recorded", self.heals, APP_SP))
+        self.assertEqual(self.heal_statements(), [heal["statement"] for heal in self.heals])
+
+    def test_a_refused_table_read_runs_no_grant_on_a_table_that_does_not_exist(self) -> None:
+        obo = PROBE["br_b11_fresh"]["obo"]
+        none = sql_answer({**obo["sql_show_volumes"], "rows": []})
+        self.serve("br_b11_fresh", none, sql_answer(obo["sql_describe_volume_missing"]), rest_answer(obo["volume_get_missing"]))
+        self.sql["SHOW TABLES IN `workspace`.`br_b11_fresh`"] = none
+        self.assertIsNone(workspace_ops.heal_reinstall(self.server.workspace(), "recorded", self.heals, APP_SP))
+        self.assertEqual(self.heal_statements(), [])
+        self.assertIn("SHOW TABLES IN `workspace`.`br_b11_fresh`", self.statements())
+
+    def test_a_refused_heal_names_the_owner_the_admin_reads(self) -> None:
+        obo = PROBE["br_b11"]["obo"]
+        self.serve("br_b11", sql_answer(obo["sql_show_volumes"]), sql_answer(obo["sql_describe_volume"]), rest_answer(obo["table_get_results"]))
+        refused = {"status": 200, "body": {"statement_id": "refused", "status": {
+            "state": "FAILED", "error": {"error_code": "PERMISSION_DENIED", "message": "User does not have MANAGE on Volume."}}}}
+        self.sql[self.heals[0]["statement"]] = refused
+        self.sql[self.heals[2]["statement"]] = refused
+        volume = workspace_ops.heal_reinstall(self.server.workspace(), "recorded", self.heals[:1], APP_SP)
+        assert volume is not None
+        self.assertEqual(volume.owners, [("volume", self.heals[0]["name"], obo["sql_describe_volume"]["rows"][0][3])])
+        table = workspace_ops.heal_reinstall(self.server.workspace(), "recorded", self.heals[2:], APP_SP)
+        assert table is not None
+        self.assertEqual(table.statement, self.heals[2]["statement"])
+        self.assertEqual(table.owners, [("table", self.heals[2]["name"], "nav@benchrouter.com")])
+        self.assertEqual(table.hint, workspace_ops.HEAL_HINT)
 
 
 class DisconnectDropsTheVolumes(unittest.TestCase):

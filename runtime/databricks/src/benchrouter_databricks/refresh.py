@@ -164,7 +164,7 @@ def build_artifact(workspace: Workspace, folder: str, route_key: str, warehouse_
     copy_declared(workspace, folder, [MANIFEST_NAME], root)
     try:
         with open(os.path.join(root, MANIFEST_NAME), encoding="utf-8") as handle:
-            manifest = load_manifest(handle.read(), route_key, own_scope=scope)
+            manifest = load_manifest(handle.read(), route_key)
     except UnicodeDecodeError:
         raise RefreshFailed("manifest_invalid") from None
     except ManifestError as error:

@@ -15,10 +15,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from benchrouter_databricks import handlers
-from benchrouter_databricks.manifest import EvalManifest, ManifestError, load_manifest
-from benchrouter_databricks.transport import ApiError
-from benchrouter_databricks.workspace import (ARTIFACT_VOLUME, RESULTS_VOLUME, Workspace, is_not_found, quote_full_name, quote_identifier,
-                                              split_full_name)
+from benchrouter_databricks.manifest import EvalManifest, ManifestError, is_benchrouter_scope, load_manifest
+from benchrouter_databricks.transport import ApiError, TransportError
+from benchrouter_databricks.workspace import (ARTIFACT_VOLUME, RESULTS_VOLUME, StatementFailed, Workspace, is_not_found, quote_full_name,
+                                              quote_identifier, split_full_name)
 
 from . import api, identity, store
 
@@ -30,8 +30,10 @@ EVAL_MANIFEST = ".benchrouter/benchrouter.yml"
 STATEMENT_WAIT_SECONDS = 90
 
 
-#: Where Unity Catalog reads each securable kind the app names an owner of.
-UC_PATHS = {"catalog": "catalogs", "schema": "schemas", "table": "tables", "volume": "volumes"}
+#: Where Unity Catalog REST reads each securable kind the app names an owner of, as the admin. No
+#: volumes: the app's user API scopes hold no `catalog.volumes`, so every OBO volume read answers 403
+#: (live, 0.2.3). The app reads volumes with SQL on the admin's `sql` scope (`_volume`).
+UC_PATHS = {"catalog": "catalogs", "schema": "schemas", "table": "tables"}
 #: Plan 4.2: why a heal statement was refused, beside its owner (the Connect screen shows it).
 HEAL_HINT = ("BenchRouter's volumes and results table in this schema belong to someone else: an earlier BenchRouter app's "
              "service principal, or the group a Disconnect handed the results to. Connect gives this app's service principal "
@@ -85,18 +87,63 @@ def owner_of(workspace: Workspace, kind: str, full_name: str) -> str:
         return "unknown"
 
 
-def _present_owner(user: Workspace, kind: str, name: str) -> tuple[bool, str | None]:
+#: Where each SQL answer holds what the heal reads (the live OBO answers, 2026-10-29, tests/fixtures/
+#: reinstall/probeapp_*.json): `SHOW VOLUMES` and `SHOW TABLES` rows are [schema, name, ...], and the
+#: one `DESCRIBE VOLUME` row is [name, catalog, schema, owner, ...].
+SHOW_NAME_INDEX = 1
+DESCRIBE_VOLUME_OWNER_INDEX = 3
+
+
+def _listed(user: Workspace, warehouse_id: str, statement: str, name: str) -> bool:
+    """Whether a SHOW statement, as the admin, lists `name` (names are case-insensitive).
+
+    A statement that fails lists nothing: a heal never runs on an object the admin was not shown.
+    """
+    try:
+        _, rows = user.query(warehouse_id, statement)
+    except StatementFailed:
+        return False
+    return any(len(row) > SHOW_NAME_INDEX and isinstance(row[SHOW_NAME_INDEX], str) and row[SHOW_NAME_INDEX].lower() == name.lower()
+               for row in rows)
+
+
+def _volume(user: Workspace, warehouse_id: str, full_name: str) -> tuple[bool, str | None]:
+    """A volume's presence and owner through SQL as the admin: membership in `SHOW VOLUMES IN <c>.<s>`,
+    then the owner of `DESCRIBE VOLUME`. Never Unity Catalog REST: the app's OBO token has no
+    `catalog.volumes` scope, so a volume read answers 403 "does not have required scopes:
+    unity-catalog" for a volume that exists and for one that does not (live). 0.2.3 took that 403 for
+    "present", ran `ALTER VOLUME ... OWNER TO` on a volume that did not exist (`UC_VOLUME_NOT_FOUND`),
+    and refused every Connect on a schema without BenchRouter volumes."""
+    catalog, schema, volume = split_full_name(full_name)
+    if not _listed(user, warehouse_id, f"SHOW VOLUMES IN {quote_identifier(catalog)}.{quote_identifier(schema)}", volume):
+        return False, None
+    try:
+        _, rows = user.query(warehouse_id, f"DESCRIBE VOLUME {quote_full_name(full_name)}")
+    except StatementFailed:
+        return True, None
+    owner = rows[0][DESCRIBE_VOLUME_OWNER_INDEX] if rows and len(rows[0]) > DESCRIBE_VOLUME_OWNER_INDEX else None
+    return True, owner if isinstance(owner, str) and owner else None
+
+
+def _present_owner(user: Workspace, warehouse_id: str, kind: str, name: str) -> tuple[bool, str | None]:
     """Whether a securable exists, as the admin reads it, and its owner when the read shows one.
 
-    A read the admin may not make (403) is taken as present with no owner, so the statement still runs
-    and its own refusal names the owner. A transient error propagates: the page reloads.
+    A volume is read with SQL (`_volume`). A table is read with Unity Catalog REST (`catalog.tables` is
+    an app user scope); a refused read (403) is checked with `SHOW TABLES` before the table counts as
+    present with no owner, so a heal never runs on a table that does not exist, and the statement's
+    own refusal names the owner. A transient error propagates: the page reloads.
     """
+    if kind == "volume":
+        return _volume(user, warehouse_id, name)
     try:
         answer = user.call("GET", f"/api/2.1/unity-catalog/{UC_PATHS[kind]}/{name}")
     except ApiError as error:
         if error.transient:
             raise
-        return (False, None) if is_not_found(error) else (True, None)
+        if is_not_found(error):
+            return False, None
+        catalog, schema, table = split_full_name(name)
+        return _listed(user, warehouse_id, f"SHOW TABLES IN {quote_identifier(catalog)}.{quote_identifier(schema)}", table), None
     owner = answer.get("owner") if isinstance(answer, dict) else None
     return True, owner if isinstance(owner, str) and owner else None
 
@@ -115,15 +162,16 @@ def heal_reinstall(user: Workspace, warehouse_id: str, heals: list[dict[str, str
     """
     for heal in heals:
         kind, name, statement = heal["securable"], heal["name"], heal["statement"]
-        present, owner = _present_owner(user, kind, name)
+        present, owner = _present_owner(user, warehouse_id, kind, name)
         if not present or (owner is not None and owner.lower() == app_principal.lower()):
             continue
         try:
             run_statement(user, warehouse_id, statement)
         except SqlRefused as refused:
-            if not _present_owner(user, kind, name)[0]:
+            present, owner = _present_owner(user, warehouse_id, kind, name)
+            if not present:
                 continue
-            return GrantRefusal(statement, refused.message, [(kind, name, owner_of(user, kind, name))], HEAL_HINT)
+            return GrantRefusal(statement, refused.message, [(kind, name, owner or "unknown")], HEAL_HINT)
     return None
 
 
@@ -174,7 +222,7 @@ def connect(token: str, user: Workspace, admin_user_name: str, catalog: str, sch
     binding_id = str(registered["binding_id"])
     agent = registered["agent"]
     scope = str(agent["secret_scope"])
-    if scope != store.SCOPE:
+    if scope != store.scope():
         raise ValueError("Connect named a scope this app does not keep its sign-ins in")
     # AUTH-012: each register revokes every earlier key, and the scope keeps the last write. So a
     # Connect writes its key under a name of its own and never overwrites another writer's; the
@@ -258,7 +306,7 @@ def remove_agent(app: Workspace, binding: dict[str, Any], exposures: list[dict[s
     deleted, so a repeat is safe.
     """
     for exposure in exposures:
-        handlers.remove_exposure(handlers.Context(app, store.SCOPE, None),
+        handlers.remove_exposure(handlers.Context(app, store.scope(), None),
                                  str(exposure["endpoint_name"]), str(exposure["provider_service_name"]))
     handlers.drop_volumes(app, [f"{binding['catalog']}.{binding['schema']}.{name}" for name in (ARTIFACT_VOLUME, RESULTS_VOLUME)])
     eval_job_id = binding.get("eval_job_id")
@@ -267,7 +315,25 @@ def remove_agent(app: Workspace, binding: dict[str, Any], exposures: list[dict[s
     job_id = app.find_job(AGENT_JOB_NAME)
     if job_id is not None:
         app.delete_job(job_id)
-    app.scope_delete(store.SCOPE)
+    app.scope_delete(store.scope())
+
+
+def stale_scopes(app: Workspace) -> list[str]:
+    """BenchRouter scopes in this workspace that are not this install's, for Status's optional clean-up.
+
+    Plan 4.7: deleting an app leaves the scope its SP made, and only a workspace admin can delete it.
+    A new install uses its own scope, and its Connect revoked every key the old one held, so the old
+    scope is only clutter. Scope names are readable by every workspace user (Databricks: "Secret scope
+    names are considered non-sensitive and are readable by all users in the workspace"; plan 4.9, Live),
+    so the app SP lists them. A list that fails shows nothing: the note is never a blocker.
+    """
+    try:
+        listed = app.call("GET", "/api/2.0/secrets/scopes/list").get("scopes") or []
+    except (ApiError, TransportError):
+        return []
+    own = store.scope().casefold()
+    names = {str(entry["name"]) for entry in listed if isinstance(entry, dict) and isinstance(entry.get("name"), str)}
+    return sorted(name for name in names if is_benchrouter_scope(name) and name.casefold() != own)
 
 
 # Add eval (plan section 4.4).
@@ -295,7 +361,7 @@ def read_manifest(workspace: Workspace, folder: str, route_key: str) -> EvalMani
         raise
     try:
         text = base64.b64decode(answer.get("content") or "").decode("utf-8")
-        return load_manifest(text, route_key, own_scope=store.SCOPE)
+        return load_manifest(text, route_key)
     except UnicodeDecodeError:
         raise ManifestInvalid(f"{EVAL_MANIFEST} is not UTF-8 text.") from None
     except ManifestError as refused:

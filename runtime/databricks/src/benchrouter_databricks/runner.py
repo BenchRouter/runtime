@@ -144,7 +144,7 @@ class Runner:
         self.claim = args["claim"]
         self.run_id = int(args["run_id"])
         self.api_base = args.get("api_base", "https://api.benchrouter.com").rstrip("/")
-        self.scope = args.get("scope", "benchrouter")
+        self.scope = args["scope"]
         self.catalog = args["catalog"]
         self.schema = args["schema"]
         self.warehouse_id = args["warehouse_id"]
@@ -328,7 +328,7 @@ class Runner:
             raise ItemFault("harness_failed", "route_key_missing")
         try:
             with open(os.path.join(files_root, MANIFEST_NAME), encoding="utf-8") as handle:
-                manifest = load_manifest(handle.read(), route_key, own_scope=self.scope)
+                manifest = load_manifest(handle.read(), route_key)
         except UnicodeDecodeError:
             raise ItemFault("harness_failed", "manifest_invalid") from None
         except ManifestError as error:

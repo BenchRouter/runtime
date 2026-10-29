@@ -10,7 +10,6 @@ grant for a manifest the runner then failed with `secret_unreadable`. The app no
 import base64
 import unittest
 
-from benchrouter_app import store
 from benchrouter_app.workspace_ops import read_manifest
 from benchrouter_databricks.manifest import load_manifest
 from tests.recorded_workspace import RecordedServer
@@ -61,7 +60,7 @@ class AppReadsTheRunnersManifest(unittest.TestCase):
     def test_same_cases_table_and_secrets(self) -> None:
         self.server.answers["GET /api/2.0/workspace/export"] = exported(MANIFEST)
         app = read_manifest(self.server.workspace(), FOLDER, ROUTE)
-        runner = load_manifest(MANIFEST, ROUTE, own_scope=store.SCOPE)
+        runner = load_manifest(MANIFEST, ROUTE)
         self.assertEqual(app.cases_table, runner.cases_table)
         self.assertEqual(app.secrets, runner.secrets)
         self.assertEqual([(s.env, s.scope, s.key) for s in app.secrets],

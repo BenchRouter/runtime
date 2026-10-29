@@ -78,20 +78,5 @@ class ChildEnvTest(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 4)
 
 
-class ReservedScopeTest(unittest.TestCase):
-    def test_a_declared_secret_never_comes_from_benchrouters_own_scope(self):
-        # Codex review round 1: the app SP's scope holds the poll key and bootstrap keys.
-        import yaml
-        from benchrouter_databricks.manifest import MANIFEST_NAME, ManifestError, parse_manifest
-        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "eval", MANIFEST_NAME), encoding="utf-8") as handle:
-            value = yaml.safe_load(handle)
-        # Databricks scope names are case-insensitive (Codex review round 2).
-        for scope in ("benchrouter", "BenchRouter"):
-            value["routes"][0]["eval_pack"]["databricks"]["secret_scope"] = scope
-            with self.assertRaises(ManifestError) as raised:
-                parse_manifest(value, "oidc-fixtures/claims", own_scope="benchrouter")
-            self.assertEqual(raised.exception.code, "secret_scope_reserved")
-
-
 if __name__ == "__main__":
     unittest.main()

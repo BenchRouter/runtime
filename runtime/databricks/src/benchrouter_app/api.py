@@ -33,7 +33,9 @@ def _segment(value: str) -> str:
 
 
 # Sign-in: the CLI authorization flow, with the CLI's default token lifetime.
-def start_sign_in(client_label: str) -> dict[str, str]:
+def start_sign_in(host: str) -> dict[str, str]:
+    """`databricks_host` tells BenchRouter which workspace this sign-in is for: a Reconnect by a new
+    app SP revokes the old install's sign-ins of that workspace only (AUTH-006, AUTH-012)."""
     nonce = secrets.token_urlsafe(32)
     verifier = secrets.token_urlsafe(48)
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
@@ -41,7 +43,8 @@ def start_sign_in(client_label: str) -> dict[str, str]:
         "nonce": nonce,
         "code_challenge": challenge,
         "client_name": "BenchRouter Databricks app",
-        "token_name": client_label[:80],
+        "token_name": f"Databricks {host}"[:80],
+        "databricks_host": host,
     })
     return {
         "transaction_id": answer["transaction_id"],
@@ -98,14 +101,6 @@ def add_eval(token: str, binding_id: str, route_key: str, eval_folder: str) -> d
                  {"route_key": route_key, "eval_folder": eval_folder})
 
 
-def expose_route(token: str, binding_id: str, fields: dict[str, Any]) -> dict[str, Any]:
-    return _call("POST", f"/v1/databricks/bindings/{_segment(binding_id)}/exposures", token, fields)
-
-
-def unexpose_route(token: str, binding_id: str, route_key: str) -> None:
-    _call("POST", f"/v1/databricks/bindings/{_segment(binding_id)}/exposures/retire", token, {"route_key": route_key})
-
-
 def disconnect(token: str, binding_id: str, results_owner: str | None, force: bool = False) -> dict[str, Any]:
     body: dict[str, Any] = {}
     if results_owner:
@@ -121,8 +116,23 @@ def account_routes(token: str) -> list[dict[str, Any]]:
     return _call("GET", "/v1/hosted-evals", token).get("routes") or []
 
 
-def create_route(token: str, product_name: str, route_name: str, model: str) -> dict[str, Any]:
-    return _call("POST", "/v1/control/routes", token, {"product": {"name": product_name}, "name": route_name, "model": model})
+def list_groups(token: str) -> list[dict[str, Any]]:
+    return _call("GET", "/v1/control/groups", token)["groups"]
+
+
+def create_route(token: str, group_name: str, route_name: str, model: str) -> dict[str, Any]:
+    """Add the route to the account's group of that name or short name, or create a new group with it."""
+    wanted = group_name.strip().lower()
+    existing = next(
+        (
+            group
+            for group in list_groups(token)
+            if group["repo"] is None and group["can_change"] and wanted in (group["name"].lower(), group["slug"])
+        ),
+        None,
+    )
+    group: dict[str, Any] = {"group_id": existing["group_id"]} if existing else {"group": {"name": group_name}}
+    return _call("POST", "/v1/control/routes", token, {**group, "name": route_name, "model": model})
 
 
 def catalog_models() -> list[str]:

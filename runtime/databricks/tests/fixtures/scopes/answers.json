@@ -1,0 +1,57 @@
+{
+  "_source": "Answer shapes of the Databricks Secrets API as documented (https://docs.databricks.com/api/workspace/secrets/listscopes: `scopes[]` of `{name, backend_type}`; https://docs.databricks.com/api/workspace/secrets/createscope), read 2026-10-29. Not recorded live as bodies; live 2026-10-29 (a probe app with the product app's scopes, scratchpad 241-probeapp), the app SP's own `GET /api/2.0/secrets/scopes/list` answered 200 with `scopes`, and the admin's OBO token answered 403 \"does not have required scopes: secrets\". Scope names are readable by every workspace user (https://docs.databricks.com/aws/en/security/secrets/, and plan section 4.9, Live). The workspace holds a customer scope, the stale `benchrouter` scope of a 0.2.3 install, the scope of a deleted 0.2.4 install (SP 6f1c2b0e-1d2a-4c3b-9e8f-0a1b2c3d4e5f) and this install's scope (SP 4d9ee9dd-3c40-43c3-8e7a-fd45442f3466). No customer content.",
+  "this_sp": "4d9ee9dd-3c40-43c3-8e7a-fd45442f3466",
+  "scopes_listed": {
+    "status": 200,
+    "body": {
+      "scopes": [
+        {
+          "name": "acme-evals",
+          "backend_type": "DATABRICKS"
+        },
+        {
+          "name": "benchrouter",
+          "backend_type": "DATABRICKS"
+        },
+        {
+          "name": "benchrouter-47f05528eaed",
+          "backend_type": "DATABRICKS"
+        },
+        {
+          "name": "benchrouter-219f290838be",
+          "backend_type": "DATABRICKS"
+        }
+      ]
+    }
+  },
+  "scopes_only_own": {
+    "status": 200,
+    "body": {
+      "scopes": [
+        {
+          "name": "acme-evals",
+          "backend_type": "DATABRICKS"
+        },
+        {
+          "name": "benchrouter-219f290838be",
+          "backend_type": "DATABRICKS"
+        }
+      ]
+    }
+  },
+  "scopes_list_refused": {
+    "status": 403,
+    "body": {
+      "error_code": "PERMISSION_DENIED",
+      "message": "documented: the caller does not have permission to make this API call"
+    }
+  },
+  "scope_created": {
+    "status": 200,
+    "body": {}
+  },
+  "secret_put": {
+    "status": 200,
+    "body": {}
+  }
+}

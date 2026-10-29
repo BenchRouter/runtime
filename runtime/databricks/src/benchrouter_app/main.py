@@ -1,7 +1,7 @@
 """The app's screens: Connect, Routes, Add eval, Status and Disconnect (plan section 4.1).
 
 Each request reads the admin from the Apps proxy headers, their BenchRouter sign-in from the
-app SP's scope, and this workspace's binding from BenchRouter. Nothing else is kept between
+install's scope, and this workspace's binding from BenchRouter. Nothing else is kept between
 requests. A screen asks the admin to act only on what only they can fix; everything that
 BenchRouter or the agent job retries is shown as state, with no Retry button.
 """
@@ -29,8 +29,6 @@ CLOSED_STATES = {"disconnected", "archived"}
 CONNECT_STALE = timedelta(minutes=10)
 STATE_LABEL = {"connecting": "Connecting", "verified": "Connected", "agent_silent": "Agent silent",
                "disconnected": "Disconnected", "archived": "Disconnected"}
-#: Endpoint names allow a-z, 0-9 and - (plan section 4.2).
-ENDPOINT_CHARS = set("abcdefghijklmnopqrstuvwxyz0123456789-")
 
 
 @dataclass
@@ -110,7 +108,7 @@ def signed_in(view):
 
 def page(template: str, session: Session, **values: Any):
     return render_template(template, session=session, state_label=STATE_LABEL, dashboard_url=api.dashboard_url,
-                           workspace_url=identity.workspace_url(), default_endpoint=default_endpoint_name, **values)
+                           workspace_url=identity.workspace_url(), **values)
 
 
 # Sign-in (AUTH-006: the CLI authorization flow).
@@ -134,7 +132,7 @@ def sign_in_screen(session: Session, notice: str | None = None):
 def start_sign_in():
     session = current_session()
     host = urllib.parse.urlsplit(identity.workspace_url()).hostname
-    store.save_pending_sign_in(identity.app_workspace(), session.user_name, api.start_sign_in(f"Databricks {host}"))
+    store.save_pending_sign_in(identity.app_workspace(), session.user_name, api.start_sign_in(str(host)))
     return redirect("/")
 
 
@@ -183,14 +181,14 @@ def connect(session: Session):
     return redirect("/status")
 
 
-# Routes: every route of the account, New route and Expose.
+# Routes: every route of the account, its serving endpoint, and New route.
 def routes_screen(session: Session, **values: Any):
     detail = session.detail or {}
     exposures = {entry["route_key"]: entry for entry in detail.get("exposures", [])}
     serving = {entry["route_key"]: entry for entry in api.account_routes(session.token)}
-    products = sorted({route["route_key"].split("/", 1)[0] for route in detail.get("routes", [])})
+    groups = sorted({group["name"] for group in api.list_groups(session.token) if group["repo"] is None and group["can_change"]})
     return page("routes.html", session, routes=detail.get("routes", []), exposures=exposures, serving=serving,
-                products=products, models=api.catalog_models(), **values)
+                groups=groups, models=api.catalog_models(), **values)
 
 
 @app.get("/routes")
@@ -198,62 +196,22 @@ def routes_screen(session: Session, **values: Any):
 def routes(session: Session):
     if session.binding is None:
         return redirect("/")
-    created = request.args.get("created")
-    exposed = request.args.get("exposed")
-    return routes_screen(session, created=created, exposed=exposed)
+    return routes_screen(session, created=request.args.get("created"))
 
 
 @app.post("/routes/new")
 @signed_in
 def new_route(session: Session):
-    form = {name: (request.form.get(name) or "").strip() for name in ("product", "name", "model")}
+    form = {name: (request.form.get(name) or "").strip() for name in ("group", "name", "model")}
     if not all(form.values()):
-        return routes_screen(session, new_route_form=form, new_route_error="Fill in the product, the route name and the model.")
+        return routes_screen(session, new_route_form=form, new_route_error="Fill in the group, the route name and the model.")
     try:
-        created = api.create_route(session.token, form["product"], form["name"], form["model"])
+        created = api.create_route(session.token, form["group"], form["name"], form["model"])
     except ApiError as error:
         return routes_screen(session, new_route_form=form, new_route_error=error.message or "The route was not created.")
+    # Plan 4.6: the agent's next poll exposes the new route; start it now so the endpoint appears soon.
+    workspace_ops.start_agent(session.binding.get("agent_job_id") if session.binding else None)
     return redirect(f"/routes?created={urllib.parse.quote(created['route_key'])}")
-
-
-def default_endpoint_name(route_key: str) -> str:
-    name = "".join(char if char in ENDPOINT_CHARS else "-" for char in route_key.lower())
-    return f"br-{name}"[:63].strip("-")
-
-
-@app.post("/routes/expose")
-@signed_in
-def expose(session: Session):
-    if session.binding is None:
-        return redirect("/")
-    route_key = request.form.get("route_key") or ""
-    endpoint = (request.form.get("endpoint_name") or default_endpoint_name(route_key)).strip()
-    # Unity Catalog grants EXECUTE on the provider service, so the caller group must be an account
-    # group: it answers 404 for the workspace-local `users` and `admins` (plan section 4.6).
-    query_group = (request.form.get("query_principal") or "account users").strip()
-    try:
-        api.expose_route(session.token, session.binding["id"], {
-            "route_key": route_key, "endpoint_name": endpoint,
-            "admin_user_name": session.user_name, "query_principal": query_group,
-        })
-    except ApiError as error:
-        return routes_screen(session, expose_error={"route_key": route_key, "message": error.message or "Expose was refused."})
-    workspace_ops.start_agent(session.binding.get("agent_job_id"))
-    return redirect(f"/routes?exposed={urllib.parse.quote(route_key)}")
-
-
-@app.post("/routes/unexpose")
-@signed_in
-def unexpose(session: Session):
-    if session.binding is None:
-        return redirect("/")
-    try:
-        api.unexpose_route(session.token, session.binding["id"], request.form.get("route_key") or "")
-    except ApiError as error:
-        if error.status != 404:
-            raise
-    workspace_ops.start_agent(session.binding.get("agent_job_id"))
-    return redirect("/routes")
 
 
 # Add eval.
@@ -326,7 +284,8 @@ def status(session: Session):
     updated = datetime.fromisoformat(session.binding["updated_at"].replace("Z", "+00:00"))
     stalled = session.binding["state"] == "connecting" and datetime.now(timezone.utc) - updated > CONNECT_STALE
     return page("status.html", session, evals=evals, exposures=detail.get("exposures", []),
-                app_sp=identity.app_sp_client_id(), added=request.args.get("added"), stalled=stalled,
+                app_sp=identity.app_sp_client_id(), scope=store.scope(), stale_scopes=workspace_ops.stale_scopes(app_sp),
+                added=request.args.get("added"), stalled=stalled,
                 disconnect_failure=detail.get("disconnect_failure"), setup_failure=detail.get("setup_failure"))
 
 
@@ -336,7 +295,7 @@ def status(session: Session):
 def disconnect_screen(session: Session):
     if session.binding is None:
         return redirect("/")
-    return page("disconnect.html", session, exposures=(session.detail or {}).get("exposures", []))
+    return page("disconnect.html", session, exposures=(session.detail or {}).get("exposures", []), scope=store.scope())
 
 
 @app.post("/disconnect")
@@ -351,7 +310,7 @@ def disconnect(session: Session):
     try:
         outcome = api.disconnect(session.token, session.binding["id"], results_owner, force)
     except ApiError as error:
-        return page("disconnect.html", session, exposures=(session.detail or {}).get("exposures", []),
+        return page("disconnect.html", session, exposures=(session.detail or {}).get("exposures", []), scope=store.scope(),
                     error=error.message or "Disconnect was refused.")
     if outcome.get("cleanup") == "queued":
         workspace_ops.start_agent(session.binding.get("agent_job_id"))
