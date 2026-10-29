@@ -178,15 +178,15 @@ def check_secrets(workspace: Workspace, secrets: tuple[Secret, ...] | list[Secre
     return missing
 
 
-def parsed_manifest(text: str, route_key: str, own_scope: str) -> EvalManifest | None:
+def parsed_manifest(text: str, route_key: str) -> EvalManifest | None:
     """The runner's own parse; None when the manifest is refused for a reason that is not a grant."""
     try:
-        return load_manifest(text, route_key, own_scope=own_scope)
+        return load_manifest(text, route_key)
     except ManifestError:
         return None
 
 
-def check_eval(workspace: Workspace, folder: str, route_key: str, own_scope: str, catalog: str | None = None,
+def check_eval(workspace: Workspace, folder: str, route_key: str, catalog: str | None = None,
                schema: str | None = None) -> list[dict[str, str]]:
     """What a refresh reads and writes: the folder's manifest and its files, the cases table, each
     secret, and BenchRouter's artifact volume (when the payload names the binding's schema)."""
@@ -194,14 +194,14 @@ def check_eval(workspace: Workspace, folder: str, route_key: str, own_scope: str
     text, missing = read_folder_manifest(workspace, folder)
     if text is None:
         return [*missing, *volume]
-    manifest = parsed_manifest(text, route_key, own_scope)
+    manifest = parsed_manifest(text, route_key)
     if manifest is None:
         return volume
     return [*check_declared_files(workspace, folder, manifest), *check_table(workspace, manifest.cases_table),
             *check_secrets(workspace, manifest.secrets), *volume]
 
 
-def check_frozen(workspace: Workspace, catalog: str, schema: str, digest: str, route_key: str, own_scope: str) -> list[dict[str, str]]:
+def check_frozen(workspace: Workspace, catalog: str, schema: str, digest: str, route_key: str) -> list[dict[str, str]]:
     """The frozen artifact's manifest in BenchRouter's volume, and each secret it declares: what a work
     run reads (runner.py).
 
@@ -222,7 +222,7 @@ def check_frozen(workspace: Workspace, catalog: str, schema: str, digest: str, r
     if data is None:
         return []
     try:
-        manifest = parsed_manifest(data.decode("utf-8"), route_key, own_scope)
+        manifest = parsed_manifest(data.decode("utf-8"), route_key)
     except UnicodeDecodeError:
         return []
     return [] if manifest is None else check_secrets(workspace, manifest.secrets)

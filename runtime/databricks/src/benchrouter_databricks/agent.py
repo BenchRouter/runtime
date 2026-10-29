@@ -24,7 +24,6 @@ from .transport import ApiError, TransportError, request_json, with_retries
 from .workspace import Workspace
 
 DEFAULT_API_BASE = "https://api.benchrouter.com"
-DEFAULT_SCOPE = "benchrouter"
 DEFAULT_POLL_KEY_NAME = "poll-key"
 #: One run handles at most this many polls; the next scheduled run picks up the rest.
 MAX_POLLS = 10
@@ -146,7 +145,8 @@ def report(benchrouter: BenchRouter, key: str, item: dict[str, Any], outcome: st
 
 def run(args: dict[str, str]) -> int:
     workspace = Workspace.from_runtime()
-    scope = args.get("scope", DEFAULT_SCOPE)
+    # Connect names the install's own scope in the job's parameters (plan section 4.1); there is no default.
+    scope = args["scope"]
     key_name = args.get("poll_key_name", DEFAULT_POLL_KEY_NAME)
     job_id_text = args.get("job_id", "")
     ctx = Context(workspace, scope, int(job_id_text) if job_id_text.isdigit() else None)

@@ -147,11 +147,11 @@ def launch_check(ctx: Context, payload: dict[str, Any]) -> Callable[[], list[dic
     catalog, schema = optional_text(payload, "catalog"), optional_text(payload, "schema")
     if payload.get("purpose") == "snapshot_refresh":
         folder = optional_text(payload, "eval_folder")
-        return None if folder is None else (lambda: grants.check_eval(ctx.workspace, folder, route_key, ctx.scope, catalog, schema))
+        return None if folder is None else (lambda: grants.check_eval(ctx.workspace, folder, route_key, catalog, schema))
     digest = optional_text(payload, "artifact_digest")
     if catalog is None or schema is None or digest is None:
         return None
-    return lambda: grants.check_frozen(ctx.workspace, catalog, schema, digest, route_key, ctx.scope)
+    return lambda: grants.check_frozen(ctx.workspace, catalog, schema, digest, route_key)
 
 
 def grant_check(ctx: Context, payload: dict[str, Any]) -> Outcome:

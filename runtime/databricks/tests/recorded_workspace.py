@@ -20,8 +20,9 @@ NOT_FOUND = {"status": 404, "body": {"error_code": "RESOURCE_DOES_NOT_EXIST", "m
 
 
 class RecordedServer:
-    """`answers` maps "METHOD /path" (the query excluded) to {status, body}, or to a list of them
-    taken in order; anything else is a 404."""
+    """`answers` maps "METHOD /path" (the query excluded) to {status, body}, to a list of them
+    taken in order, or to a function of the request body that picks one (a SQL statement's answer
+    by its text); anything else is a 404."""
 
     def __init__(self, answers: dict[str, Any]) -> None:
         self.answers = answers
@@ -37,6 +38,8 @@ class RecordedServer:
                 query = dict(urllib.parse.parse_qsl(parsed.query))
                 server.calls.append((self.command, urllib.parse.unquote(parsed.path), query, body))
                 answer = server.answers.get(f"{self.command} {urllib.parse.unquote(parsed.path)}", NOT_FOUND)
+                if callable(answer):
+                    answer = answer(body)
                 if isinstance(answer, list):
                     # A sequence: each call takes the next answer, and the last one repeats.
                     answer = answer.pop(0) if len(answer) > 1 else answer[0]

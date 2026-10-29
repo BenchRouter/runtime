@@ -39,7 +39,7 @@
   <p>The agent job has missed three checks in a row. Routes keep serving. A workspace admin can check:</p>
   <ul>
     <li>the job <code>BenchRouter agent</code>{% if binding.agent_job_id %} (<a href="{{ workspace_url }}/jobs/{{ binding.agent_job_id }}" target="_blank" rel="noopener">open</a>){% endif %}, its schedule, and its last runs;</li>
-    <li>the secret scope <code>benchrouter</code> and its <code>poll-key</code>;</li>
+    <li>the secret scope <code>{{ scope }}</code> and its <code>poll-key</code>;</li>
     <li>the app's service principal <code>{{ app_sp }}</code> still has workspace access.</li>
   </ul>
   <p>The status returns to Connected at the next check that works. If the job or its key is gone, connect again: it writes a new key and sets the job up again.</p>
@@ -89,8 +89,18 @@
 <p class="muted">No route has an eval here yet. <a href="/evals">Add eval</a>.</p>
 {% endif %}
 
+{% if stale_scopes %}
+<div class="card">
+  <p><strong>Clean up (optional)</strong></p>
+  {% for name in stale_scopes %}
+  <p>The secret scope <code>{{ name }}</code> is left from an earlier install of this app, and it holds only revoked keys. A workspace admin can delete it:</p>
+  <pre>databricks secrets delete-scope {{ name }}</pre>
+  {% endfor %}
+</div>
+{% endif %}
+
 <h2>Serving endpoints</h2>
 {% if exposures %}
 <ul>{% for exposure in exposures %}<li><code>{{ exposure.endpoint_name }}</code> for <code>{{ exposure.route_key }}</code>: {% if exposure.failure %}{{ exposure.failure.title }} (<a href="/routes">see Routes</a>){% else %}{{ exposure.state }}{% endif %}</li>{% endfor %}</ul>
-{% else %}<p class="muted">No route is exposed. <a href="/routes">Expose one</a>.</p>{% endif %}
+{% else %}<p class="muted">No serving endpoint yet. The agent job creates one for each route at its next check. <a href="/routes">See Routes</a>.</p>{% endif %}
 {% endblock %}

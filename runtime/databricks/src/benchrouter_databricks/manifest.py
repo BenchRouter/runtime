@@ -250,7 +250,20 @@ def _normalization(value: Any, primary: str) -> Normalization:
     return Normalization(primary, metrics, tuple(pass_metrics), min_score)
 
 
-def load_manifest(text: str, route_key: str, own_scope: str | None = None) -> EvalManifest:
+#: Every BenchRouter install's own scope starts with it (plan section 4.1); `benchrouter` was the one name before.
+BENCHROUTER_SCOPE_PREFIX = "benchrouter-"
+
+
+def is_benchrouter_scope(name: str) -> bool:
+    """A scope BenchRouter's app makes: it holds BenchRouter's credentials, never a customer secret.
+
+    Databricks scope names are case-insensitive.
+    """
+    folded = name.casefold()
+    return folded == "benchrouter" or folded.startswith(BENCHROUTER_SCOPE_PREFIX)
+
+
+def load_manifest(text: str, route_key: str) -> EvalManifest:
     """Parses the YAML text with `yaml.safe_load` (plain data, no tags) and takes `route_key`'s entry."""
     import yaml  # PyYAML, a dependency of this wheel
 
@@ -258,11 +271,11 @@ def load_manifest(text: str, route_key: str, own_scope: str | None = None) -> Ev
         value = yaml.safe_load(text)
     except yaml.YAMLError:
         raise _fail("is not valid YAML") from None
-    return parse_manifest(value, route_key, own_scope)
+    return parse_manifest(value, route_key)
 
 
-def parse_manifest(value: Any, route_key: str, own_scope: str | None = None) -> EvalManifest:
-    """`own_scope` is the app SP's scope (poll key, bootstrap keys, case salt): no declared secret may come from it."""
+def parse_manifest(value: Any, route_key: str) -> EvalManifest:
+    """No declared secret may come from a BenchRouter scope (poll key, bootstrap keys, case salt, sign-ins)."""
     if not isinstance(value, dict) or not isinstance(value.get("routes"), list):
         raise _fail("routes must be a list")
     entries = [entry for entry in value["routes"] if isinstance(entry, dict) and entry.get("route_id") == route_key]
@@ -321,10 +334,9 @@ def parse_manifest(value: Any, route_key: str, own_scope: str | None = None) -> 
     scope = _optional_text(block.get("secret_scope"), "databricks.secret_scope")
     if secret_env and scope is None:
         raise _fail("databricks.secret_scope is required when secret_env names a secret")
-    # Databricks scope names are case-insensitive.
-    if scope is not None and own_scope is not None and scope.casefold() == own_scope.casefold():
+    if scope is not None and is_benchrouter_scope(scope):
         # The scope holds BenchRouter's own credentials; eval code never receives them.
-        raise ManifestError("secret_scope_reserved", "databricks.secret_scope is BenchRouter's own scope")
+        raise ManifestError("secret_scope_reserved", "databricks.secret_scope may not be a BenchRouter scope (benchrouter or benchrouter-*)")
     secrets = []
     for index, env in enumerate(secret_env):
         name = _text(env, f"eval_pack.secret_env[{index}]", 64)

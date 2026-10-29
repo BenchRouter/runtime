@@ -9,7 +9,7 @@
   <ul>
     <li>the serving endpoint and provider service of each exposed route{% if exposures %}:
       {% for exposure in exposures %}<code>{{ exposure.endpoint_name }}</code>{{ ", " if not loop.last else "" }}{% endfor %}. Anything that calls these names gets errors from then on{% endif %};</li>
-    <li>the eval job, the secret scope <code>benchrouter</code> (which signs everyone out of this app), and the agent job itself.</li>
+    <li>the eval job, the secret scope <code>{{ scope }}</code> (which signs everyone out of this app), and the agent job itself.</li>
   </ul>
   <p>It keeps the results table and the MLflow experiment. They are your records. Routes with an eval here keep their models, and their evals wait until you connect a workspace again.</p>
 </div>

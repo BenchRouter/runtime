@@ -1,12 +1,11 @@
 {% extends "base.html" %}
 {% set pending_exposure = exposures.values() | selectattr("state", "ne", "exposed") | selectattr("failure", "none") | list %}
-{% if pending_exposure %}{% set refresh = 10 %}{% endif %}
+{% if pending_exposure or (created and created not in exposures) %}{% set refresh = 10 %}{% endif %}
 {% block body %}
 <h1>Routes</h1>
-<p class="lead">Every route of {{ session.sign_in.account.display_name }}. Expose a route to call it from SQL, notebooks, jobs and apps in this workspace. Code outside Databricks calls the route on BenchRouter directly.</p>
+<p class="lead">Every route of {{ session.sign_in.account.display_name }}. Each route has a serving endpoint in this workspace, so every user of this workspace can call it from SQL, notebooks, jobs and apps. Code outside Databricks calls the route on BenchRouter directly.</p>
 
-{% if created %}<div class="notice ok">Route <code>{{ created }}</code> is ready. It serves the model you chose until an eval finds a better one. Expose it below, or <a href="/evals?route={{ created | urlencode }}">add an eval</a>.</div>{% endif %}
-{% if exposed %}<div class="notice wait">The agent job is creating the serving endpoint for <code>{{ exposed }}</code>. This page updates when it is ready, usually within two minutes.</div>{% endif %}
+{% if created %}<div class="notice ok">Route <code>{{ created }}</code> is ready. It serves the model you chose until an eval finds a better one. The agent job is creating its serving endpoint; this page updates when it is ready, usually within two minutes. You can <a href="/evals?route={{ created | urlencode }}">add an eval</a> now.</div>{% endif %}
 
 <div class="table-wrap">
 <table>
@@ -31,17 +30,8 @@
         {% if exposure.state == "exposed" %}
         <pre>SELECT ai_query('{{ exposure.endpoint_name }}', 'Hello')</pre>
         {% endif %}
-        {% if exposure.state != "retiring" %}
-        <form method="post" action="/routes/unexpose"><input type="hidden" name="route_key" value="{{ route.route_key }}"><button class="quiet" type="submit">Remove endpoint</button></form>
-        {% endif %}
       {% else %}
-        {% if expose_error and expose_error.route_key == route.route_key %}<div class="notice bad">{{ expose_error.message }}</div>{% endif %}
-        <form method="post" action="/routes/expose" class="inline">
-          <input type="hidden" name="route_key" value="{{ route.route_key }}">
-          <input name="endpoint_name" aria-label="Endpoint name" value="{{ default_endpoint(route.route_key) }}" size="24">
-          <input name="query_principal" aria-label="Account group that may call it" value="account users" size="12" title="An account group that may call the endpoint">
-          <button type="submit">Expose</button>
-        </form>
+        <span class="badge wait">Waiting</span> <span class="muted">The agent job creates the endpoint at its next check.</span>
       {% endif %}
     </td>
   </tr>
@@ -54,10 +44,10 @@
 <h2>New route</h2>
 <form method="post" action="/routes/new" class="card">
   {% if new_route_error %}<div class="notice bad">{{ new_route_error }}</div>{% endif %}
-  <label for="product">Product</label>
-  <input id="product" name="product" list="products" value="{{ new_route_form.product if new_route_form else '' }}" placeholder="Support bot">
-  <datalist id="products">{% for product in products %}<option value="{{ product }}">{% endfor %}</datalist>
-  <p class="muted">A route joins the product of the same name, or a new product.</p>
+  <label for="group">Group</label>
+  <input id="group" name="group" list="groups" value="{{ new_route_form.group if new_route_form else '' }}" placeholder="Support bot">
+  <datalist id="groups">{% for group in groups %}<option value="{{ group }}">{% endfor %}</datalist>
+  <p class="muted">A route joins the group of the same name, or a new group.</p>
   <label for="name">Route name</label>
   <input id="name" name="name" value="{{ new_route_form.name if new_route_form else '' }}" placeholder="Triage">
   <label for="model">Model</label>
@@ -73,7 +63,7 @@
 <pre>from openai import OpenAI
 client = OpenAI(base_url="https://api.benchrouter.com/v1", api_key=BENCHROUTER_API_KEY)
 client.chat.completions.create(model="&lt;route&gt;", messages=[{"role": "user", "content": "Hello"}])</pre>
-<p>Inside Databricks, call an exposed route by its endpoint name, with a Databricks token:</p>
+<p>Inside Databricks, call a route by its endpoint name, with a Databricks token:</p>
 <pre>client = OpenAI(base_url="{{ workspace_url }}/serving-endpoints", api_key=DATABRICKS_TOKEN)
 client.chat.completions.create(model="&lt;endpoint name&gt;", messages=[{"role": "user", "content": "Hello"}])</pre>
 {% endblock %}
