@@ -255,7 +255,7 @@ BENCHROUTER_SCOPE_PREFIX = "benchrouter-"
 
 
 def is_benchrouter_scope(name: str) -> bool:
-    """A scope BenchRouter's app makes: it holds BenchRouter's credentials, never a customer secret.
+    """A scope the CLI creates: it holds BenchRouter's credentials, never a customer secret.
 
     Databricks scope names are case-insensitive.
     """

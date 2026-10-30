@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, cast
 
 from .transport import ApiError, with_retries
-from .workspace import Principal, PrincipalGrant, StatementFailed, Workspace, quote_full_name, quote_identifier, split_full_name
+from .workspace import Principal, PrincipalGrant, StatementFailed, Workspace, cast_parameter, quote_full_name, quote_identifier, split_full_name, statement_parameter
 
 # Plan section 4.5: the only column types a results table may declare.
 COLUMN_TYPES = {"STRING", "BIGINT", "DOUBLE", "BOOLEAN", "TIMESTAMP", "DATE", "DECIMAL(18,6)", "MAP<STRING, DOUBLE>"}
@@ -160,9 +160,6 @@ def _require_grants(missing: list[dict[str, str]]) -> None:
 def launch_check(ctx: Context, payload: dict[str, Any]) -> Callable[[], list[dict[str, str]]] | None:
     """Plan 4.4: the check of what this launch's run will read, or None when the payload names no target
     (BenchRouter found no eval row for it at the poll), in which case the launch runs unchecked.
-
-    `grants` is imported here, not at the top: the app imports this module and never launches, so
-    the BenchRouter/databricks-app mirror needs no grant-check modules.
     """
     from . import grants
 
@@ -246,6 +243,56 @@ def run_sql(ctx: Context, warehouse_id: str, step: str, statement: str) -> None:
         permanent(step, lambda: ctx.workspace.execute_sql(warehouse_id, statement))
     except StatementFailed as error:
         raise Failed(sanitized_code(f"{step}_{error.code}")) from None
+
+
+# DATA-001 / plan 4.5: fixed columns only. Preserve measured values when a summary
+# has no observation; unmeasured_cause must clear to NULL after a successful measure.
+RESULTS_UPDATE_COLUMNS = {
+    "set_state": "STRING", "role": "STRING", "measured": "BOOLEAN", "unmeasured_cause": "STRING",
+    "cases": "BIGINT", "cases_passed": "BIGINT", "pass_rate": "DOUBLE", "primary_metric": "STRING",
+    "primary_score": "DOUBLE", "eval_cost_usd": "DECIMAL(18,6)", "latency_p50_ms": "DOUBLE", "latency_p95_ms": "DOUBLE",
+    "on_frontier": "BOOLEAN", "is_chosen": "BOOLEAN", "chosen_model": "STRING", "decision": "STRING",
+    "decision_reason": "STRING", "serving_model": "STRING", "route_runtime_cost_usd_30d": "DECIMAL(18,6)",
+    "benchrouter_url": "STRING",
+}
+RESULTS_MEASURED_COLUMNS = {
+    "measured", "cases", "cases_passed", "pass_rate", "primary_metric", "primary_score",
+    "eval_cost_usd", "latency_p50_ms", "latency_p95_ms", "route_runtime_cost_usd_30d",
+}
+RESULTS_ROW_COLUMNS = {
+    "role", "measured", "unmeasured_cause", "cases", "cases_passed", "pass_rate", "primary_metric", "primary_score",
+    "eval_cost_usd", "latency_p50_ms", "latency_p95_ms", "on_frontier", "is_chosen",
+}
+
+
+def results_update(ctx: Context, payload: dict[str, Any]) -> Outcome:
+    """Update existing rows for a settled set; never insert or overwrite local run data."""
+    warehouse_id = text(payload, "warehouse_id")
+    result_set_id = text(payload, "result_set_id")
+    rows = payload.get("rows")
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise Failed("payload_invalid")
+    try:
+        table = quote_full_name(text(payload, "table"))
+    except ValueError:
+        raise Failed("identifier_invalid") from None
+    assignments = ", ".join(
+        f"`{name}` = " + (f"COALESCE({cast_parameter(name, kind)}, `{name}`)"
+                         if name in RESULTS_MEASURED_COLUMNS else cast_parameter(name, kind))
+        for name, kind in RESULTS_UPDATE_COLUMNS.items()
+    )
+    statement = (f"UPDATE {table} SET {assignments} "
+                 "WHERE result_set_id = :result_set_id AND candidate_model = :candidate_model")
+    statements_run = 0
+    for row in rows:
+        parameters = [statement_parameter(name, (row if name in RESULTS_ROW_COLUMNS else payload).get(name), kind)
+                      for name, kind in RESULTS_UPDATE_COLUMNS.items()]
+        parameters += [statement_parameter("result_set_id", result_set_id, "STRING"),
+                       statement_parameter("candidate_model", text(row, "candidate_model"), "STRING")]
+        permanent("results_update", lambda: ctx.workspace.execute_sql(warehouse_id, statement, parameters))
+        statements_run += 1
+    # Recorded statement answers have no UPDATE affected-row count. Do not infer a wire shape.
+    return Outcome({"object": "results_update", "rows_updated": statements_run})
 
 
 def setup_results_table(ctx: Context, payload: dict[str, Any]) -> Outcome:
@@ -427,6 +474,7 @@ SETUP_OBJECTS: dict[str, Callable[[Context, dict[str, Any]], Outcome]] = {
     "experiment": setup_experiment,
     "volume": setup_volume,
     "results_table": setup_results_table,
+    "results_update": results_update,
     "eval_job": setup_eval_job,
     "serving_endpoint": setup_serving_endpoint,
     # Plan 4.4: the claim-less re-check of an eval that waits for a grant (a setup item by object).
@@ -461,7 +509,7 @@ def drop_volumes(ws: Workspace, names: list[str]) -> None:
     They are BenchRouter's scratch: every receipt reached BenchRouter before the runner wrote the
     results volume, and a later Connect freezes the artifacts again. Unity Catalog's REST delete
     needs no SQL warehouse. A volume already gone (404) counts as deleted, and one the agent SP may
-    not delete (403) is not its own (an earlier app's SP made it), so both are skipped; any other
+    not delete (403) is not its own (an earlier agent SP made it), so both are skipped; any other
     refusal fails the item, which the next poll queues again.
     """
     for name in names:

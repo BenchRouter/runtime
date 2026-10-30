@@ -1,6 +1,6 @@
 """The refresh of fixed cases (plan section 4.4, `purpose = snapshot_refresh`).
 
-As the app SP, in the runner parent: read the eval folder's `.benchrouter/benchrouter.yml`, copy the
+As the agent SP, in the runner parent: read the eval folder's `.benchrouter/benchrouter.yml`, copy the
 declared code, freeze the cases table at a pinned Delta version into `cases.jsonl` (ordered by
 opaque case id), download every locked wheel binary-only and hash-checked, then write the
 content-addressed artifact to the artifact volume and report its manifest of hashes. The
@@ -222,7 +222,7 @@ def run_refresh(workspace: Workspace, folder: str, route_key: str, warehouse_id:
             try:
                 digest = publish(root, artifact, volume_root(catalog, schema, ARTIFACT_VOLUME))
             except (VolumeRefused, PermissionError):
-                # BenchRouter's artifact volume refused the app SP: a grant Connect heals, not the eval's fault.
+                # BenchRouter's artifact volume refused the agent SP: a grant Connect heals, not the eval's fault.
                 return {"kind": "databricks_unavailable", "cause": "artifact_volume_refused"}
         except RefreshFailed as failure:
             return {"kind": "databricks_unavailable", "cause": failure.cause}

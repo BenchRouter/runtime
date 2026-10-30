@@ -300,6 +300,18 @@ class StatementFailed(Exception):
         self.code = code
 
 
+def statement_parameter(name: str, value: Any, kind: str) -> dict[str, Any]:
+    """A typed statement parameter; a missing value is SQL NULL."""
+    entry: dict[str, Any] = {"name": name, "type": kind}
+    if value is not None:
+        entry["value"] = ("true" if value else "false") if isinstance(value, bool) else str(value)
+    return entry
+
+
+def cast_parameter(name: str, kind: str) -> str:
+    return f"CAST(:{name} AS {kind})"
+
+
 def acl_entry(principal: Principal, level: str) -> dict[str, str]:
     """AUTH-012: map the verified principal type to the workspace ACL field."""
     field = {"user": "user_name", "service_principal": "service_principal_name", "group": "group_name"}[principal["type"]]

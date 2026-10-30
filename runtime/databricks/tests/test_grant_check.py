@@ -1,4 +1,4 @@
-"""Plan 4.4: the agent checks the eval's grants as the app SP before `run-now`.
+"""Plan 4.4: the agent checks the eval's grants as the agent SP before `run-now`.
 
 A refresh launch checks what the refresh reads (the folder's manifest, its cases table, its
 secrets); a work launch checks what the work run reads (the frozen artifact's secrets), the same
@@ -18,7 +18,7 @@ import unittest
 from benchrouter_databricks.agent import BenchRouter, handle_item
 from benchrouter_databricks.handlers import Context
 from tests.recorded_workspace import GRANT_ANSWERS, RecordedServer
-from tests.test_app_manifest import MANIFEST, ROUTE, FOLDER
+from tests.eval_manifest import MANIFEST, ROUTE, FOLDER
 
 EXPORT = "GET /api/2.0/workspace/export"
 TABLE = "GET /api/2.1/unity-catalog/tables/main.support.triage_cases"

@@ -1,15 +1,16 @@
 """The eval job's results task (plan section 4.5). `run_if: ALL_DONE`; no BenchRouter credential.
 
 It reads what the runner parent left in `<results volume>/<claim>/` and writes it into the
-customer's workspace, as the app SP:
+customer's workspace, as the agent SP:
 
 - the MLflow experiment (`/Shared/benchrouter/<binding>`): one run per work item with the
   metrics, the ledger metrics and the `benchrouter.*` tags, the per-case assessments as an
   artifact, and a copy of each case trace (`mlflow.log_trace`, request and response) with its
   assessments (`mlflow.log_feedback`, `mlflow.log_expectation`). A copy is a new trace with a
   new id, not the original span tree (plan A.6, P15).
-- the results table, append only: one row per candidate model of the set per job run, by
+- the results table: this task appends one row per candidate model of the set per job run, by
   `MERGE ... WHEN NOT MATCHED THEN INSERT` on (`job_run_id`, `result_set_id`, `candidate_model`).
+  The agent later updates existing rows with the settled summary (handlers.results_update).
 
 A failed results task changes no eval, no decision and no route. It imports MLflow (the image's
 trusted set) and reads the child's local store as data only; it runs no customer code.
@@ -28,7 +29,7 @@ from typing import Any
 from .agent import parse_args
 from .artifact import RESULTS_VOLUME, volume_root
 from .transport import with_retries
-from .workspace import Workspace, quote_full_name
+from .workspace import Workspace, cast_parameter, quote_full_name, statement_parameter
 
 KEY_COLUMNS = ("job_run_id", "result_set_id", "candidate_model")
 
@@ -36,14 +37,6 @@ KEY_COLUMNS = ("job_run_id", "result_set_id", "candidate_model")
 def log(message: str, **fields: Any) -> None:
     detail = " ".join(f"{name}={value}" for name, value in fields.items())
     print(f"benchrouter-results {message} {detail}".rstrip(), flush=True)
-
-
-def _parameter(name: str, value: Any, kind: str) -> dict[str, Any]:
-    """A typed statement parameter; a missing value is SQL NULL."""
-    entry: dict[str, Any] = {"name": name, "type": kind}
-    if value is not None:
-        entry["value"] = ("true" if value else "false") if isinstance(value, bool) else str(value)
-    return entry
 
 
 def table_rows(record: dict[str, Any], written_at: str) -> list[list[dict[str, Any]]]:
@@ -56,39 +49,39 @@ def table_rows(record: dict[str, Any], written_at: str) -> list[list[dict[str, A
         own = row.get("candidate_model") == record.get("model")
         metrics = json.dumps(record.get("metrics")) if own and isinstance(record.get("metrics"), dict) else None
         rows.append([
-            _parameter("written_at", written_at, "TIMESTAMP"),
-            _parameter("job_run_id", record.get("job_run_id"), "BIGINT"),
-            _parameter("claim_id", record.get("claim_id"), "STRING"),
-            _parameter("route_key", summary.get("route_key"), "STRING"),
-            _parameter("route_id", summary.get("route_id"), "STRING"),
-            _parameter("result_set_id", summary.get("result_set_id"), "STRING"),
-            _parameter("set_state", summary.get("set_state"), "STRING"),
-            _parameter("artifact_digest", summary.get("artifact_digest"), "STRING"),
-            _parameter("acceptance_fingerprint", summary.get("acceptance_fingerprint"), "STRING"),
-            _parameter("candidate_model", row.get("candidate_model"), "STRING"),
-            _parameter("role", row.get("role"), "STRING"),
-            _parameter("measured", row.get("measured"), "BOOLEAN"),
-            _parameter("unmeasured_cause", row.get("unmeasured_cause"), "STRING"),
-            _parameter("cases", row.get("cases"), "BIGINT"),
-            _parameter("cases_passed", row.get("cases_passed"), "BIGINT"),
-            _parameter("pass_rate", row.get("pass_rate"), "DOUBLE"),
-            _parameter("primary_metric", row.get("primary_metric"), "STRING"),
-            _parameter("primary_score", row.get("primary_score"), "DOUBLE"),
-            _parameter("metrics", metrics, "STRING"),
-            _parameter("eval_cost_usd", row.get("eval_cost_usd"), "DECIMAL(18,6)"),
+            statement_parameter("written_at", written_at, "TIMESTAMP"),
+            statement_parameter("job_run_id", record.get("job_run_id"), "BIGINT"),
+            statement_parameter("claim_id", record.get("claim_id"), "STRING"),
+            statement_parameter("route_key", summary.get("route_key"), "STRING"),
+            statement_parameter("route_id", summary.get("route_id"), "STRING"),
+            statement_parameter("result_set_id", summary.get("result_set_id"), "STRING"),
+            statement_parameter("set_state", summary.get("set_state"), "STRING"),
+            statement_parameter("artifact_digest", summary.get("artifact_digest"), "STRING"),
+            statement_parameter("acceptance_fingerprint", summary.get("acceptance_fingerprint"), "STRING"),
+            statement_parameter("candidate_model", row.get("candidate_model"), "STRING"),
+            statement_parameter("role", row.get("role"), "STRING"),
+            statement_parameter("measured", row.get("measured"), "BOOLEAN"),
+            statement_parameter("unmeasured_cause", row.get("unmeasured_cause"), "STRING"),
+            statement_parameter("cases", row.get("cases"), "BIGINT"),
+            statement_parameter("cases_passed", row.get("cases_passed"), "BIGINT"),
+            statement_parameter("pass_rate", row.get("pass_rate"), "DOUBLE"),
+            statement_parameter("primary_metric", row.get("primary_metric"), "STRING"),
+            statement_parameter("primary_score", row.get("primary_score"), "DOUBLE"),
+            statement_parameter("metrics", metrics, "STRING"),
+            statement_parameter("eval_cost_usd", row.get("eval_cost_usd"), "DECIMAL(18,6)"),
             # The ledger does not keep per-route call counts per window yet (plan 4.4).
-            _parameter("eval_calls", None, "BIGINT"),
-            _parameter("latency_p50_ms", row.get("latency_p50_ms"), "DOUBLE"),
-            _parameter("latency_p95_ms", row.get("latency_p95_ms"), "DOUBLE"),
-            _parameter("on_frontier", row.get("on_frontier"), "BOOLEAN"),
-            _parameter("is_chosen", row.get("is_chosen"), "BOOLEAN"),
-            _parameter("chosen_model", summary.get("chosen_model"), "STRING"),
-            _parameter("decision", summary.get("decision"), "STRING"),
-            _parameter("decision_reason", summary.get("decision_reason"), "STRING"),
-            _parameter("serving_model", summary.get("serving_model"), "STRING"),
-            _parameter("route_runtime_cost_usd_30d", summary.get("route_runtime_cost_usd_30d"), "DECIMAL(18,6)"),
-            _parameter("route_runtime_calls_30d", None, "BIGINT"),
-            _parameter("benchrouter_url", summary.get("benchrouter_url"), "STRING"),
+            statement_parameter("eval_calls", None, "BIGINT"),
+            statement_parameter("latency_p50_ms", row.get("latency_p50_ms"), "DOUBLE"),
+            statement_parameter("latency_p95_ms", row.get("latency_p95_ms"), "DOUBLE"),
+            statement_parameter("on_frontier", row.get("on_frontier"), "BOOLEAN"),
+            statement_parameter("is_chosen", row.get("is_chosen"), "BOOLEAN"),
+            statement_parameter("chosen_model", summary.get("chosen_model"), "STRING"),
+            statement_parameter("decision", summary.get("decision"), "STRING"),
+            statement_parameter("decision_reason", summary.get("decision_reason"), "STRING"),
+            statement_parameter("serving_model", summary.get("serving_model"), "STRING"),
+            statement_parameter("route_runtime_cost_usd_30d", summary.get("route_runtime_cost_usd_30d"), "DECIMAL(18,6)"),
+            statement_parameter("route_runtime_calls_30d", None, "BIGINT"),
+            statement_parameter("benchrouter_url", summary.get("benchrouter_url"), "STRING"),
         ])
     return rows
 
@@ -97,7 +90,7 @@ def merge_statement(table: str, parameters: list[dict[str, Any]]) -> str:
     def value(entry: dict[str, Any]) -> str:
         if entry["name"] == "metrics":
             return "from_json(:metrics, 'MAP<STRING, DOUBLE>')"
-        return f"CAST(:{entry['name']} AS {entry['type']})"
+        return cast_parameter(entry["name"], entry["type"])
 
     columns = [entry["name"] for entry in parameters]
     selected = ", ".join(f"{value(entry)} AS `{entry['name']}`" for entry in parameters)

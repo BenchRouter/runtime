@@ -11,7 +11,7 @@ startup claim:
    runs alone: copy the planned artifact into a private directory and verify every file
    (`tree_mutated`), build the venv offline from the locked wheels (`install_failed`), run the
    evaluator child, map its assessments to the receipt, and upload, or fail with a fixed cause.
-5. Read the result summary until the set closes (at most 5 minutes) and leave it, with the
+5. Read the result summary once after upload and leave it, with the
    child's local MLflow store, in the results volume for the results task.
 
 The parent holds the bootstrap key and the session credential in memory only, imports no
@@ -52,8 +52,6 @@ LOCAL_EXPIRY_MARGIN_S = 15
 #: Plan 4.3: the parent waits for its bootstrap key inside the 20-minute prepare deadline.
 KEY_WAIT_S = 20 * 60
 KEY_POLL_S = 5
-SUMMARY_POLL_S = 30
-SUMMARY_WAIT_S = 5 * 60
 IDLE_EXIT_GRACE = 1.25
 INSTALL_TIMEOUT_S = 600
 PIP_ENV_NAMES = ("PATH", "HOME")
@@ -308,7 +306,7 @@ class Runner:
         deadline_at = parse_time(item["work_deadline_at"])
 
         # Copy the planned artifact into the private directory and prove every file. Only a copy that
-        # does not match its digest is `tree_mutated`. A volume the app SP may not read (B11 smoke 8b:
+        # does not match its digest is `tree_mutated`. A volume the agent SP may not read (B11 smoke 8b:
         # a reinstall's new SP, before Connect healed the volume) and an artifact that is gone are not
         # the eval's fault: each has its own fixed reason, which BenchRouter shows as its own or as
         # Connect's to fix (src/shared/failure-display.ts), never as "fix the eval".
@@ -415,18 +413,12 @@ class Runner:
     # 5. Results hand-off ------------------------------------------------------------------
 
     def summary(self, result_set_id: str) -> dict[str, Any] | None:
-        """Plan 4.5: poll the result summary until the set closes, for at most 5 minutes."""
-        deadline = time.monotonic() + SUMMARY_WAIT_S
-        last: dict[str, Any] | None = None
-        while True:
-            try:
-                last = self.client.result_summary(result_set_id)
-            except (RunnerApiError, TransportError, ProtocolError) as error:
-                log("summary unavailable", error=getattr(error, "code", type(error).__name__))
-                return last
-            if last.get("set_state") in ("closed", "published") or time.monotonic() + SUMMARY_POLL_S > deadline:
-                return last
-            time.sleep(SUMMARY_POLL_S)
+        """RUN-001 / plan 4.5: read once; the agent later updates the closed set's rows."""
+        try:
+            return self.client.result_summary(result_set_id)
+        except (RunnerApiError, TransportError, ProtocolError) as error:
+            log("summary unavailable", error=getattr(error, "code", type(error).__name__))
+            return None
 
     def write_run(self, record: dict[str, Any], store: str | None = None) -> None:
         """Leaves the run's record (and the child's local MLflow store) for the results task."""

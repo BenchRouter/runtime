@@ -1,6 +1,6 @@
 """A local socket that replays recorded Databricks and BenchRouter answers, by method and path.
 
-Tests drive the agent's and the app's own HTTP clients against it; nothing inside them is
+Tests drive the agent's own HTTP clients against it; nothing inside them is
 replaced. Each call is logged, so a test can prove which calls were (and were not) made.
 """
 
