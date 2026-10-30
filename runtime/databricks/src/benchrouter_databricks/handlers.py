@@ -1,7 +1,7 @@
 """One handler per work-item kind (docs/plan-databricks-integration.md, section 4.2).
 
-Each handler applies what its payload names, as the app SP, and is idempotent by object
-name: a re-delivered item (a lost report, an ended lease) finds the object it made and
+Each handler applies what its payload names as the agent SP created by the CLI. It is idempotent
+by object name: a re-delivered item (a lost report, an ended lease) finds the object it made and
 updates it, or finds it gone and moves on. A handler returns the report result and an
 optional step that runs after the report answers. It raises `Failed` with a fixed code
 for a refusal that a repeat would not fix; any other error leaves the item unreported, so
@@ -11,14 +11,22 @@ its lease ends and BenchRouter hands it out again (at most five times).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 from .transport import ApiError, with_retries
-from .workspace import StatementFailed, Workspace, quote_full_name, quote_identifier, split_full_name
+from .workspace import Principal, PrincipalGrant, StatementFailed, Workspace, quote_full_name, quote_identifier, split_full_name
 
 # Plan section 4.5: the only column types a results table may declare.
 COLUMN_TYPES = {"STRING", "BIGINT", "DOUBLE", "BOOLEAN", "TIMESTAMP", "DATE", "DECIMAL(18,6)", "MAP<STRING, DOUBLE>"}
 CHAT_API_TYPE = "openai/v1/chat/completions"
+
+# AUTH-012: live REST probe, 2026-10-30, evidence/h3-probe-raw.jsonl.
+# c-ep-config-admin, d-ep-config-sp2-manage: both phrases distinguish a frozen endpoint.
+FROZEN_ENDPOINT_PRINCIPAL_PHRASE = "Delegating principal"
+FROZEN_ENDPOINT_WORKSPACE_PHRASE = "is not a member of workspace"
+# c-ps-config-admin, d-ps-config-sp2; c-ps-grant-admin, d-ps-grant-sp2.
+PROVIDER_UPDATE_PERMISSION_PHRASE = "caller lacks permission to update the model provider service"
+PROVIDER_GRANT_MANAGE_PHRASE = "does not have MANAGE on MODEL_PROVIDER_SERVICE"
 
 
 class Failed(Exception):
@@ -27,6 +35,10 @@ class Failed(Exception):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+class EndpointDeletionPending(Exception):
+    """Transient: endpoint deletion is settling; leave the item unreported until its next lease."""
 
 
 @dataclass
@@ -72,14 +84,27 @@ def optional_text(payload: dict[str, Any], name: str) -> str | None:
     return value
 
 
-def principals(payload: dict[str, Any], name: str) -> list[str]:
-    """An optional list of principal names; absent is none."""
-    value = payload.get(name)
-    if value is None:
-        return []
-    if not isinstance(value, list) or not all(isinstance(entry, str) and entry for entry in value):
+def principal(value: Any) -> Principal:
+    """AUTH-012: payload principals are typed; pre-launch, no string compatibility path."""
+    if not isinstance(value, dict) or value.get("type") not in ("user", "service_principal", "group"):
         raise Failed("payload_invalid")
-    return list(value)
+    name = value.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise Failed("payload_invalid")
+    return cast(Principal, value)
+
+
+def optional_principal(payload: dict[str, Any], name: str) -> Principal | None:
+    value = payload.get(name)
+    return None if value is None else principal(value)
+
+
+def principals(payload: dict[str, Any], name: str) -> list[Principal]:
+    """An optional list of typed principals; absent is none."""
+    value = payload.get(name, [])
+    if not isinstance(value, list):
+        raise Failed("payload_invalid")
+    return [principal(entry) for entry in value]
 
 
 def integer(payload: dict[str, Any], name: str) -> int:
@@ -104,7 +129,7 @@ def permanent(step: str, call: Callable[[], Any]) -> Any:
 def launch(ctx: Context, payload: dict[str, Any]) -> Outcome:
     """`run-now` with BenchRouter's token; a repeat returns the same run (plan 4.3).
 
-    First, as the app SP, the eval's grants (plan 4.4): a missing one raises `grants.GrantNeeded`,
+    First, as the agent SP, the eval's grants (plan 4.4): a missing one raises `grants.GrantNeeded`,
     which the agent reports as `grant_needed`, and no run starts.
     """
     claim_id = text(payload, "claim_id")
@@ -198,13 +223,14 @@ def setup(ctx: Context, payload: dict[str, Any]) -> Outcome:
 
 
 def setup_experiment(ctx: Context, payload: dict[str, Any]) -> Outcome:
+    readers = principals(payload, "read_principals")
     path = text(payload, "path")
     if not path.startswith("/Shared/"):
-        # Plan 4.5: the app SP's home folder is deleted with the app.
+        # Plan 4.5: the experiment must survive a change of agent SP.
         raise Failed("experiment_path_invalid")
     experiment_id = permanent("experiment", lambda: ctx.workspace.ensure_experiment(path))
     # Plan 4.5: the whole reader list each time (the recorded admins and the optional results group).
-    for reader in principals(payload, "read_principals"):
+    for reader in readers:
         permanent("experiment_grant", lambda reader=reader: ctx.workspace.grant_experiment(experiment_id, reader, "CAN_READ"))
     return Outcome({"object": "experiment", "experiment_id": experiment_id})
 
@@ -223,18 +249,22 @@ def run_sql(ctx: Context, warehouse_id: str, step: str, statement: str) -> None:
 
 
 def setup_results_table(ctx: Context, payload: dict[str, Any]) -> Outcome:
-    """Plan 4.5: creates the results table, and gives its readers SELECT while the app SP owns it.
+    """Plan 4.5: creates the results table, and gives its readers SELECT while the agent SP owns it.
 
     After a reinstall the table can belong to someone else: a Disconnect handed it to the admin's
-    group, or the app SP that made it is gone. Its owner then decides who reads it, so the app SP
-    grants no reader. Connect gave the app SP SELECT and MODIFY on it as the admin (plan 4.2), so the
-    item is done once the app SP can see it. The owner comes from Unity Catalog `tables/get` as the
-    app SP: B11 smoke 8b recorded 403 PERMISSION_DENIED for a table the app SP has no privilege
+    group, or the agent SP that made it is gone. Its owner then decides who reads it, so the agent SP
+    grants no reader. Connect gave the agent SP SELECT and MODIFY on it as the admin (plan 4.2), so the
+    item is done once the agent SP can see it. The owner comes from Unity Catalog `tables/get` as the
+    agent SP: B11 smoke 8b recorded 403 PERMISSION_DENIED for a table the agent SP has no privilege
     on, which fails the item (`results_table_get_http_403`), and an `owner` field once it can read
     it. Before, the item ran `GRANT SELECT` on a table it did not own and failed
     `grant_select_bad_request`. MODIFY is not checked apart: a refused write shows in the results
     task, which changes no eval.
     """
+    agent_principal = principal(payload.get("agent_principal"))
+    if agent_principal["type"] != "service_principal":
+        raise Failed("payload_invalid")
+    readers = principals(payload, "read_principals")
     table = text(payload, "table")
     warehouse_id = text(payload, "warehouse_id")
     columns = payload.get("columns")
@@ -250,17 +280,16 @@ def setup_results_table(ctx: Context, payload: dict[str, Any]) -> Outcome:
     except ValueError:
         raise Failed("identifier_invalid") from None
     run_sql(ctx, warehouse_id, "create_table", f"CREATE TABLE IF NOT EXISTS {quoted} ({', '.join(definitions)})")
-    app_principal = text(payload, "app_principal")
     found = permanent("results_table_get", lambda: ctx.workspace.call("GET", f"/api/2.1/unity-catalog/tables/{table}"))
     owner = found.get("owner") if isinstance(found, dict) else None
-    if not isinstance(owner, str) or owner.lower() != app_principal.lower():
+    if not isinstance(owner, str) or owner.lower() != agent_principal["name"].lower():
         return Outcome({"object": "results_table", "table_name": table})
-    for reader in principals(payload, "read_principals"):
+    for reader in readers:
         try:
-            principal = quote_identifier(reader)
+            who = quote_identifier(reader["name"])
         except ValueError:
             raise Failed("identifier_invalid") from None
-        run_sql(ctx, warehouse_id, "grant_select", f"GRANT SELECT ON TABLE {quoted} TO {principal}")
+        run_sql(ctx, warehouse_id, "grant_select", f"GRANT SELECT ON TABLE {quoted} TO {who}")
     return Outcome({"object": "results_table", "table_name": table})
 
 
@@ -303,8 +332,25 @@ def provider_service_config(route_key: str, api_base: str, runtime_key: str) -> 
     }
 
 
+def provider_service_change(step: str, call: Callable[[], Any]) -> Any:
+    """AUTH-012, DATA-001: report an orphaned provider service with a fixed code only."""
+    try:
+        return call()
+    except ApiError as error:
+        if error.status == 403 and error.code == "PERMISSION_DENIED":
+            refusal = (PROVIDER_UPDATE_PERMISSION_PHRASE if step == "service_update"
+                       else PROVIDER_GRANT_MANAGE_PHRASE)
+            if refusal in (error.message or ""):
+                raise Failed("provider_service_unmanageable") from None
+        if error.transient:
+            raise
+        raise Failed(fixed_code(step, error)) from None
+
+
 def apply_exposure(ctx: Context, payload: dict[str, Any]) -> dict[str, Any]:
     """Creates or updates both objects of an exposed route with the item's runtime key."""
+    querier = optional_principal(payload, "query_principal")
+    managers = principals(payload, "manage_principals")
     endpoint = text(payload, "endpoint_name")
     service = text(payload, "provider_service")
     route_key = text(payload, "route_key")
@@ -321,34 +367,55 @@ def apply_exposure(ctx: Context, payload: dict[str, Any]) -> dict[str, Any]:
 
     config = endpoint_config(endpoint, route_key, api_base, runtime_key)
     current = permanent("endpoint_get", lambda: ws.get_endpoint(endpoint))
+    if current is not None:
+        try:
+            ws.update_endpoint_config(endpoint, config)
+        except ApiError as error:
+            message = error.message or ""
+            # AUTH-012, A.7: the deleted creator freezes updates for everyone. Never retry it.
+            if (error.status == 403 and error.code == "PERMISSION_DENIED"
+                    and FROZEN_ENDPOINT_PRINCIPAL_PHRASE in message and FROZEN_ENDPOINT_WORKSPACE_PHRASE in message):
+                permanent("endpoint_delete", lambda: ws.delete_endpoint(endpoint))
+                current = None
+            elif error.transient:
+                raise
+            else:
+                raise Failed(fixed_code("endpoint_update", error)) from None
     if current is None:
-        current = permanent("endpoint_create", lambda: ws.create_endpoint(endpoint, config))
-    else:
-        permanent("endpoint_update", lambda: ws.update_endpoint_config(endpoint, config))
+        try:
+            current = ws.create_endpoint(endpoint, config)
+        except ApiError as error:
+            if error.code == "RESOURCE_ALREADY_EXISTS":
+                raise EndpointDeletionPending() from None
+            if error.transient:
+                raise
+            raise Failed(fixed_code("endpoint_create", error)) from None
+
+    endpoint_id = current.get("id")
+    if querier is not None or managers:
+        if not isinstance(endpoint_id, str) or not endpoint_id:
+            # The item cannot be done until its ACL is restored. A later delivery reads its id.
+            raise ValueError("endpoint_id_missing")
+        if querier is not None:
+            permanent("endpoint_grant", lambda: ws.grant_endpoint(endpoint_id, querier, "CAN_QUERY"))
+        for manager in managers:
+            permanent("endpoint_grant", lambda manager=manager: ws.grant_endpoint(endpoint_id, manager, "CAN_MANAGE"))
 
     service_config = provider_service_config(route_key, api_base, runtime_key)
     if permanent("service_get", lambda: ws.get_provider_service(service)) is None:
         permanent("service_create", lambda: ws.create_provider_service(service, service_config))
     else:
-        permanent("service_update", lambda: ws.update_provider_service(service, service_config))
+        provider_service_change("service_update", lambda: ws.update_provider_service(service, service_config))
 
-    querier = optional_text(payload, "query_principal")
-    if querier is not None:
-        endpoint_id = current.get("id")
-        if isinstance(endpoint_id, str):
-            permanent("endpoint_grant", lambda: ws.grant_endpoint(endpoint_id, querier, "CAN_QUERY"))
-    managers = payload.get("manage_principals") or []
-    if not isinstance(managers, list) or not all(isinstance(name, str) and name for name in managers):
-        raise Failed("payload_invalid")
-    # B0 (plan A.6, P5): an admin can delete a provider service the app SP owns only with
+    # B0 (plan A.6, P5): an admin can delete a provider service the agent SP owns only with
     # an explicit MANAGE grant, and its owner cannot change. The `admins` group cannot take
     # a grant (plan 4.6), so the payload names each principal; each setup and rotation
     # grants again.
-    changes = [{"principal": name, "add": ["MANAGE"]} for name in managers]
+    changes: list[PrincipalGrant] = [{"principal": manager, "add": ["MANAGE"]} for manager in managers]
     if querier is not None:
         changes.append({"principal": querier, "add": ["EXECUTE"]})
     if changes:
-        permanent("service_grant", lambda: ws.grant_provider_service(service, changes))
+        provider_service_change("service_grant", lambda: ws.grant_provider_service(service, changes))
     return {"object": endpoint, "endpoint_name": endpoint, "service_name": service}
 
 
@@ -393,7 +460,7 @@ def drop_volumes(ws: Workspace, names: list[str]) -> None:
 
     They are BenchRouter's scratch: every receipt reached BenchRouter before the runner wrote the
     results volume, and a later Connect freezes the artifacts again. Unity Catalog's REST delete
-    needs no SQL warehouse. A volume already gone (404) counts as deleted, and one the app SP may
+    needs no SQL warehouse. A volume already gone (404) counts as deleted, and one the agent SP may
     not delete (403) is not its own (an earlier app's SP made it), so both are skipped; any other
     refusal fails the item, which the next poll queues again.
     """
@@ -412,7 +479,7 @@ def drop_volumes(ws: Workspace, names: list[str]) -> None:
 
 
 def visible_record(step: str, call: Callable[[], Any]) -> Any:
-    """Reads a record Disconnect hands over. The app SP can always see what it owns, so 403 or 404
+    """Reads a record Disconnect hands over. The agent SP can always see what it owns, so 403 or 404
     means the record is not its own: it was handed over before (a Disconnect, then a Reconnect that
     reused it). That gives None, and the handover skips it. Any other refusal fails the item (the
     next poll queues it again); a transient error propagates, so the item comes again."""
@@ -427,8 +494,12 @@ def visible_record(step: str, call: Callable[[], Any]) -> Any:
 
 
 def disconnect(ctx: Context, payload: dict[str, Any]) -> Outcome:
-    """Plan 4.7: the app SP deletes what it created and hands the records to the admin's group."""
+    """Plan 4.7: the agent SP deletes what it created and hands the records to the admin's group."""
     ws = ctx.workspace
+    owner = optional_principal(payload, "results_owner")
+    agent_principal = principal(payload.get("agent_principal"))
+    if agent_principal["type"] != "service_principal":
+        raise Failed("payload_invalid")
     runs = payload.get("cancel_runs") or []
     exposures = payload.get("exposures") or []
     if not isinstance(runs, list) or not isinstance(exposures, list):
@@ -446,22 +517,20 @@ def disconnect(ctx: Context, payload: dict[str, Any]) -> Outcome:
         raise Failed("payload_invalid")
 
     # The results are the customer's records: they stay, handed to the named owner. With no
-    # owner (a Disconnect from the dashboard), they stay with the app SP for an admin. A record
-    # the app SP can no longer see was handed over already (a Disconnect, then a Reconnect that
+    # owner (a Disconnect from the dashboard), they stay with the agent SP for an admin. A record
+    # the agent SP can no longer see was handed over already (a Disconnect, then a Reconnect that
     # reused it): it is someone else's, so it is skipped (B7 smoke). So is a table it can see but
     # does not own: after a reinstall Connect gave this SP SELECT and MODIFY on a table a deleted
     # SP or the admin's group owns, and an `OWNER TO` would fail every cleanup (Codex gate, PR #683).
     # A table it owns, it must hand over: any refusal there fails the item.
-    owner = optional_text(payload, "results_owner")
     warehouse_id = optional_text(payload, "warehouse_id")
     table = text(payload, "results_table")
-    app_principal = text(payload, "app_principal")
     found = visible_record("table_get", lambda: ws.call("GET", f"/api/2.1/unity-catalog/tables/{table}"))
     table_owner = found.get("owner") if isinstance(found, dict) else None
-    owns_table = isinstance(table_owner, str) and table_owner.lower() == app_principal.lower()
+    owns_table = isinstance(table_owner, str) and table_owner.lower() == agent_principal["name"].lower()
     if owner is not None and warehouse_id is not None and owns_table:
         try:
-            statement = f"ALTER TABLE {quote_full_name(table)} OWNER TO {quote_identifier(owner)}"
+            statement = f"ALTER TABLE {quote_full_name(table)} OWNER TO {quote_identifier(owner['name'])}"
         except ValueError:
             raise Failed("identifier_invalid") from None
         run_sql(ctx, warehouse_id, "table_owner", statement)
@@ -469,7 +538,7 @@ def disconnect(ctx: Context, payload: dict[str, Any]) -> Outcome:
     if owner is not None and experiment_id is not None:
         permanent("experiment_grant", lambda: ws.grant_experiment(experiment_id, owner, "CAN_MANAGE"))
     # Plan 4.7: after the handover, before the jobs go. A volume left behind would belong to a
-    # service principal that a reinstall deletes, and the next app's SP could not use it (B11 8b).
+    # service principal a reinstall replaces, and the next agent SP could not use it (B11 8b).
     drop_volumes(ws, volumes)
     eval_job_id = payload.get("eval_job_id")
     if isinstance(eval_job_id, int) and eval_job_id > 0:

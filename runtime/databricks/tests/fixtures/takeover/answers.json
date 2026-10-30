@@ -1,0 +1,388 @@
+{
+  "_source": "AUTH-012, DATA-001. Live REST probe, 2026-10-30, h3-probe-raw.jsonl. Each status and complete body is copied verbatim from its named label, including details and request ids. Empty successful replies are also used where the handler does not read the body. No credential or customer content.",
+  "frozen_endpoint": {
+    "_comment": "h3-probe-raw.jsonl, c-ep-get-admin: GET /api/2.0/serving-endpoints/br-wheel-probe-ep. Status and body exactly as recorded.",
+    "status": 200,
+    "body": {
+      "name": "br-wheel-probe-ep",
+      "creator": "unknown user",
+      "creation_timestamp": 1793337623000,
+      "last_updated_timestamp": 1793337623000,
+      "state": {
+        "ready": "READY",
+        "config_update": "NOT_UPDATING"
+      },
+      "config": {
+        "served_entities": [
+          {
+            "name": "br-wheel-probe-ep",
+            "external_model": {
+              "provider": "custom",
+              "name": "probe/route",
+              "task": "llm/v1/chat",
+              "custom_provider_config": {
+                "custom_provider_url": "https://api.benchrouter.com/v1/chat/completions",
+                "bearer_token_auth": {}
+              }
+            },
+            "type": "EXTERNAL_MODEL",
+            "state": {
+              "deployment": "DEPLOYMENT_READY",
+              "deployment_state_message": ""
+            },
+            "creator": "unknown user",
+            "creation_timestamp": 1793337623000
+          }
+        ],
+        "traffic_config": {
+          "routes": [
+            {
+              "served_model_name": "br-wheel-probe-ep",
+              "traffic_percentage": 100
+            }
+          ]
+        },
+        "config_version": 1
+      },
+      "id": "08bfdc85766549b4911da167d0181261",
+      "permission_level": "CAN_MANAGE",
+      "task": "llm/v1/chat",
+      "route_optimized": false,
+      "endpoint_type": "EXTERNAL_MODEL",
+      "resource_credential_strategy": "EMBEDDED_CREDENTIALS",
+      "description": ""
+    }
+  },
+  "endpoint_frozen": {
+    "_comment": "h3-probe-raw.jsonl, d-ep-config-sp2-manage: PUT /api/2.0/serving-endpoints/br-wheel-probe-ep/config. Status and body exactly as recorded.",
+    "status": 403,
+    "body": {
+      "error_code": "PERMISSION_DENIED",
+      "message": "Delegating principal 71632281951740 is not a member of workspace 7474660687257254",
+      "details": [
+        {
+          "@type": "type.googleapis.com/google.rpc.RequestInfo",
+          "request_id": "27c15030-1999-4377-abae-07166e0c6633",
+          "serving_data": ""
+        }
+      ]
+    }
+  },
+  "endpoint_frozen_admin": {
+    "_comment": "h3-probe-raw.jsonl, c-ep-config-admin: PUT /api/2.0/serving-endpoints/br-wheel-probe-ep/config. Status and body exactly as recorded.",
+    "status": 403,
+    "body": {
+      "error_code": "PERMISSION_DENIED",
+      "message": "Delegating principal 71632281951740 is not a member of workspace 7474660687257254",
+      "details": [
+        {
+          "@type": "type.googleapis.com/google.rpc.RequestInfo",
+          "request_id": "1509e2e1-657b-45b9-a3fe-3d0644a9d6d5",
+          "serving_data": ""
+        }
+      ]
+    }
+  },
+  "endpoint_manage_refused": {
+    "_comment": "h3-probe-raw.jsonl, d-ep-config-sp2-nogrant: PUT /api/2.0/serving-endpoints/br-wheel-probe-ep/config. Status and body exactly as recorded.",
+    "status": 403,
+    "body": {
+      "error_code": "PERMISSION_DENIED",
+      "message": "User does not have permission 'Manage' on Endpoint br-wheel-probe-ep",
+      "details": [
+        {
+          "@type": "type.googleapis.com/google.rpc.RequestInfo",
+          "request_id": "d521a42a-46d2-4c3d-b0a8-6813869e96d3",
+          "serving_data": ""
+        }
+      ]
+    }
+  },
+  "endpoint_delete_refused": {
+    "_comment": "h3-probe-raw.jsonl, d-ep-delete-sp2-nogrant: DELETE /api/2.0/serving-endpoints/br-wheel-probe-ep. Status and body exactly as recorded.",
+    "status": 403,
+    "body": {
+      "error_code": "PERMISSION_DENIED",
+      "message": "User does not have permission 'Manage' on Endpoint br-wheel-probe-ep",
+      "details": [
+        {
+          "@type": "type.googleapis.com/google.rpc.RequestInfo",
+          "request_id": "8c18ff38-3a05-4042-b8a5-912026072af3",
+          "serving_data": ""
+        }
+      ]
+    }
+  },
+  "provider_update_refused": {
+    "_comment": "h3-probe-raw.jsonl, d-ps-config-sp2: PATCH /api/2.1/unity-catalog/model-provider-services/workspace.br_wheel_probe.br_wheel_probe_ps?update_mask=config. Status and body exactly as recorded.",
+    "status": 403,
+    "body": {
+      "error_code": "PERMISSION_DENIED",
+      "message": "caller lacks permission to update the model provider service",
+      "details": [
+        {
+          "@type": "type.googleapis.com/google.rpc.RequestInfo",
+          "request_id": "3579e385-68cb-44ac-97eb-60422489f93c",
+          "serving_data": ""
+        }
+      ]
+    }
+  },
+  "provider_update_admin_refused": {
+    "_comment": "h3-probe-raw.jsonl, c-ps-config-admin: PATCH /api/2.1/unity-catalog/model-provider-services/workspace.br_wheel_probe.br_wheel_probe_ps?update_mask=config. Status and body exactly as recorded.",
+    "status": 403,
+    "body": {
+      "error_code": "PERMISSION_DENIED",
+      "message": "caller lacks permission to update the model provider service",
+      "details": [
+        {
+          "@type": "type.googleapis.com/google.rpc.RequestInfo",
+          "request_id": "1b2f9985-525b-4fc1-b719-1804e9d3c9ec",
+          "serving_data": ""
+        }
+      ]
+    }
+  },
+  "provider_manage_refused": {
+    "_comment": "h3-probe-raw.jsonl, d-ps-grant-sp2: PATCH /api/2.1/unity-catalog/permissions/model_provider_service/workspace.br_wheel_probe.br_wheel_probe_ps. Status and body exactly as recorded.",
+    "status": 403,
+    "body": {
+      "error_code": "PERMISSION_DENIED",
+      "message": "Principal 'br-wheel-probe-sp2' does not have MANAGE on MODEL_PROVIDER_SERVICE 'e9b668a8-eaa0-4d18-9e5e-5a2e99a5a996'.",
+      "details": [
+        {
+          "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+          "reason": "PERMISSION_DENIED",
+          "domain": "unity-catalog.databricks.com",
+          "metadata": {
+            "resourceType": "MODEL_PROVIDER_SERVICE",
+            "databricks.com/message_template": "<principalName> does not have <msg> on <resourceType> '<resourceName>'.",
+            "principalName": "Principal 'br-wheel-probe-sp2'",
+            "resourceName": "e9b668a8-eaa0-4d18-9e5e-5a2e99a5a996",
+            "databricks.com/sql_state": "42501",
+            "msg": "MANAGE"
+          }
+        },
+        {
+          "@type": "type.googleapis.com/google.rpc.RequestInfo",
+          "request_id": "f8d5e197-1230-4306-ae4c-c9d8463393e5",
+          "serving_data": ""
+        }
+      ]
+    }
+  },
+  "provider_manage_admin_refused": {
+    "_comment": "h3-probe-raw.jsonl, c-ps-grant-admin: PATCH /api/2.1/unity-catalog/permissions/model_provider_service/workspace.br_wheel_probe.br_wheel_probe_ps. Status and body exactly as recorded.",
+    "status": 403,
+    "body": {
+      "error_code": "PERMISSION_DENIED",
+      "message": "Principal 'nav@benchrouter.com' does not have MANAGE on MODEL_PROVIDER_SERVICE 'e9b668a8-eaa0-4d18-9e5e-5a2e99a5a996'.",
+      "details": [
+        {
+          "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+          "reason": "PERMISSION_DENIED",
+          "domain": "unity-catalog.databricks.com",
+          "metadata": {
+            "resourceType": "MODEL_PROVIDER_SERVICE",
+            "databricks.com/message_template": "<principalName> does not have <msg> on <resourceType> '<resourceName>'.",
+            "principalName": "Principal 'nav@benchrouter.com'",
+            "resourceName": "e9b668a8-eaa0-4d18-9e5e-5a2e99a5a996",
+            "databricks.com/sql_state": "42501",
+            "msg": "MANAGE"
+          }
+        },
+        {
+          "@type": "type.googleapis.com/google.rpc.RequestInfo",
+          "request_id": "1d818849-ba42-40a0-8d37-887b66621781",
+          "serving_data": ""
+        }
+      ]
+    }
+  },
+  "provider_use_refused": {
+    "_comment": "h3-probe-raw.jsonl, d-ps-delete-sp2: DELETE /api/2.1/unity-catalog/model-provider-services/workspace.br_wheel_probe.br_wheel_probe_ps. Status and body exactly as recorded.",
+    "status": 403,
+    "body": {
+      "error_code": "PERMISSION_DENIED",
+      "message": "User does not have permission to use model provider service 'workspace.br_wheel_probe.br_wheel_probe_ps'",
+      "details": [
+        {
+          "@type": "type.googleapis.com/google.rpc.RequestInfo",
+          "request_id": "95246016-19c4-48a7-806b-4a9942d8a264",
+          "serving_data": ""
+        }
+      ]
+    }
+  },
+  "provider_orphan": {
+    "_comment": "h3-probe-raw.jsonl, c-ps-get-admin: GET /api/2.1/unity-catalog/model-provider-services/workspace.br_wheel_probe.br_wheel_probe_ps. Status and body exactly as recorded.",
+    "status": 200,
+    "body": {
+      "name": "model-provider-services/workspace.br_wheel_probe.br_wheel_probe_ps",
+      "effective_owner": "unknown",
+      "id": "e9b668a8-eaa0-4d18-9e5e-5a2e99a5a996",
+      "securable_type": "MODEL_PROVIDER_SERVICE",
+      "metastore_id": "557a21b8-6390-4e56-98d7-9a0c20b84c32",
+      "create_time": "2026-10-30T05:20:24.960Z",
+      "created_by": "unknown",
+      "update_time": "2026-10-30T05:20:24.960Z",
+      "updated_by": "unknown",
+      "comment": "BenchRouter H3 probe",
+      "etag": "CAESCAAAAaGLQImA",
+      "config": {
+        "provider_type": "EXTERNAL_MODEL_PROVIDER_TYPE_CUSTOM",
+        "custom": {
+          "direct": {
+            "base_url": "https://api.benchrouter.com/v1",
+            "api_key": {}
+          }
+        },
+        "targets": [
+          {
+            "model": "probe/route",
+            "native_api_types": [
+              "openai/v1/chat/completions"
+            ],
+            "endpoint_route": "chat/completions"
+          }
+        ]
+      }
+    }
+  },
+  "provider_managed": {
+    "_comment": "h3-probe-raw.jsonl, d-ps-get-sp2: GET /api/2.1/unity-catalog/model-provider-services/workspace.br_wheel_probe.br_wheel_probe_ps. Status and body exactly as recorded.",
+    "status": 200,
+    "body": {
+      "name": "model-provider-services/workspace.br_wheel_probe.br_wheel_probe_ps",
+      "effective_owner": "91bf20c9-c773-4ba1-9708-383c70e0b8f3",
+      "id": "e9b668a8-eaa0-4d18-9e5e-5a2e99a5a996",
+      "securable_type": "MODEL_PROVIDER_SERVICE",
+      "metastore_id": "557a21b8-6390-4e56-98d7-9a0c20b84c32",
+      "create_time": "2026-10-30T05:20:24.960Z",
+      "created_by": "91bf20c9-c773-4ba1-9708-383c70e0b8f3",
+      "update_time": "2026-10-30T05:20:24.960Z",
+      "updated_by": "91bf20c9-c773-4ba1-9708-383c70e0b8f3",
+      "comment": "BenchRouter H3 probe",
+      "etag": "CAESCAAAAaGLQImA",
+      "config": {
+        "provider_type": "EXTERNAL_MODEL_PROVIDER_TYPE_CUSTOM",
+        "custom": {
+          "direct": {
+            "base_url": "https://api.benchrouter.com/v1",
+            "api_key": {}
+          }
+        },
+        "targets": [
+          {
+            "model": "probe/route",
+            "native_api_types": [
+              "openai/v1/chat/completions"
+            ],
+            "endpoint_route": "chat/completions"
+          }
+        ]
+      }
+    }
+  },
+  "endpoint_deleted": {
+    "_comment": "h3-probe-raw.jsonl, d-ep-delete-sp2-manage: DELETE /api/2.0/serving-endpoints/br-wheel-probe-ep. Status and body exactly as recorded.",
+    "status": 200,
+    "body": {}
+  },
+  "endpoint_created": {
+    "_comment": "h3-probe-raw.jsonl, d-ep-create-sp2: POST /api/2.0/serving-endpoints. Status and body exactly as recorded.",
+    "status": 200,
+    "body": {
+      "name": "br-wheel-probe-ep",
+      "creator": "875d056f-f734-435b-b167-6191e4c87b21",
+      "creation_timestamp": 1793337776000,
+      "last_updated_timestamp": 1793337776000,
+      "state": {
+        "ready": "READY",
+        "config_update": "NOT_UPDATING"
+      },
+      "config": {
+        "served_entities": [
+          {
+            "name": "br-wheel-probe-ep",
+            "external_model": {
+              "provider": "custom",
+              "name": "probe/route",
+              "task": "llm/v1/chat",
+              "custom_provider_config": {
+                "custom_provider_url": "https://api.benchrouter.com/v1/chat/completions",
+                "bearer_token_auth": {}
+              }
+            },
+            "type": "EXTERNAL_MODEL",
+            "state": {
+              "deployment": "DEPLOYMENT_READY",
+              "deployment_state_message": ""
+            },
+            "creator": "875d056f-f734-435b-b167-6191e4c87b21",
+            "creation_timestamp": 1793337776000
+          }
+        ],
+        "traffic_config": {
+          "routes": [
+            {
+              "served_model_name": "br-wheel-probe-ep",
+              "traffic_percentage": 100
+            }
+          ]
+        },
+        "config_version": 1
+      },
+      "id": "27588b7e3fa24a06b17b13f7a2db8ef0",
+      "permission_level": "CAN_MANAGE",
+      "task": "llm/v1/chat",
+      "route_optimized": false,
+      "endpoint_type": "EXTERNAL_MODEL",
+      "creator_display_name": "br-wheel-probe-sp2",
+      "creator_kind": "ServicePrincipal",
+      "resource_credential_strategy": "EMBEDDED_CREDENTIALS",
+      "description": ""
+    }
+  },
+  "endpoint_acl": {
+    "_comment": "h3-probe-raw.jsonl, d-ep-acl-sp2-manage: PATCH /api/2.0/permissions/serving-endpoints/08bfdc85766549b4911da167d0181261. Status and body exactly as recorded.",
+    "status": 200,
+    "body": {
+      "object_id": "/serving-endpoints/08bfdc85766549b4911da167d0181261",
+      "object_type": "serving-endpoint",
+      "access_control_list": [
+        {
+          "service_principal_name": "875d056f-f734-435b-b167-6191e4c87b21",
+          "display_name": "br-wheel-probe-sp2",
+          "all_permissions": [
+            {
+              "permission_level": "CAN_MANAGE",
+              "inherited": false
+            }
+          ]
+        },
+        {
+          "group_name": "account users",
+          "all_permissions": [
+            {
+              "permission_level": "CAN_QUERY",
+              "inherited": false
+            }
+          ]
+        },
+        {
+          "group_name": "admins",
+          "all_permissions": [
+            {
+              "permission_level": "CAN_MANAGE",
+              "inherited": true,
+              "inherited_from_object": [
+                "/serving-endpoints"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

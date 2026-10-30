@@ -69,9 +69,9 @@ class DisconnectHandoverTest(unittest.TestCase):
 
     def test_a_visible_record_whose_handover_is_refused_fails_the_item(self) -> None:
         payload = {
-            "results_owner": "br-b7-no-such-group", "warehouse_id": "recorded", "results_table": TABLE,
+            "results_owner": {"type": "group", "name": "br-b7-no-such-group"}, "warehouse_id": "recorded", "results_table": TABLE,
             "experiment_path": "/Shared/benchrouter/recorded", "scope": "benchrouter", "agent_job_id": 99,
-            "exposures": [], "cancel_runs": [], "volumes": ["workspace.br_b7.benchrouter_artifacts"], "app_principal": APP_SP,
+            "exposures": [], "cancel_runs": [], "volumes": ["workspace.br_b7.benchrouter_artifacts"], "agent_principal": {"type": "service_principal", "name": APP_SP},
         }
         with self.assertRaises(Failed) as refused:
             disconnect(self.ctx, payload)

@@ -1,4 +1,4 @@
-"""The Databricks REST calls the agent makes, as the identity the job runs as (the app SP)."""
+"""The Databricks REST calls the agent makes as the agent SP created by the CLI."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import base64
 import os
 import time
 import urllib.parse
-from typing import Any, Callable
+from typing import Any, Callable, Literal, TypedDict
 
 from .transport import TIMEOUT_SECONDS, USER_AGENT, ApiError, _api_error, request_json, send
 
@@ -17,6 +17,16 @@ RESULTS_VOLUME = "benchrouter_results"
 
 NOT_FOUND_CODES = {"RESOURCE_DOES_NOT_EXIST", "NOT_FOUND", "TABLE_OR_VIEW_NOT_FOUND", "ENDPOINT_NOT_FOUND"}
 STATEMENT_WAIT_SECONDS = 300
+
+
+class Principal(TypedDict):
+    type: Literal["user", "service_principal", "group"]
+    name: str
+
+
+class PrincipalGrant(TypedDict):
+    principal: Principal
+    add: list[str]
 
 
 def is_not_found(error: ApiError) -> bool:
@@ -52,7 +62,7 @@ class Workspace:
     def call(self, method: str, path: str, body: Any = None, query: dict[str, str] | None = None) -> Any:
         return request_json(method, f"{self.host}{path}", self._auth(), body, query)
 
-    # Secrets: the poll key and the bootstrap keys live in the app SP's scope.
+    # Secrets: the poll key and the bootstrap keys live in the agent SP's scope.
     def secret_get(self, scope: str, key: str) -> str | None:
         try:
             answer = self.call("GET", "/api/2.0/secrets/get", query={"scope": scope, "key": key})
@@ -147,7 +157,7 @@ class Workspace:
             if not is_not_found(error):
                 raise
 
-    def grant_endpoint(self, endpoint_id: str, principal: str, level: str) -> None:
+    def grant_endpoint(self, endpoint_id: str, principal: Principal, level: str) -> None:
         self.call("PATCH", f"/api/2.0/permissions/serving-endpoints/{endpoint_id}",
                   {"access_control_list": [acl_entry(principal, level)]})
 
@@ -177,8 +187,10 @@ class Workspace:
             if not is_not_found(error):
                 raise
 
-    def grant_provider_service(self, full_name: str, changes: list[dict[str, Any]]) -> None:
-        self.call("PATCH", f"/api/2.1/unity-catalog/permissions/model_provider_service/{full_name}", {"changes": changes})
+    def grant_provider_service(self, full_name: str, changes: list[PrincipalGrant]) -> None:
+        # Unity Catalog takes names, including application ids for service principals.
+        wire_changes = [{"principal": change["principal"]["name"], "add": change["add"]} for change in changes]
+        self.call("PATCH", f"/api/2.1/unity-catalog/permissions/model_provider_service/{full_name}", {"changes": wire_changes})
 
     # Unity Catalog volumes and tables.
     def ensure_volume(self, catalog: str, schema: str, name: str) -> None:
@@ -277,7 +289,7 @@ class Workspace:
             raise
         return str(answer["experiment"]["experiment_id"])
 
-    def grant_experiment(self, experiment_id: str, principal: str, level: str) -> None:
+    def grant_experiment(self, experiment_id: str, principal: Principal, level: str) -> None:
         self.call("PATCH", f"/api/2.0/permissions/experiments/{experiment_id}",
                   {"access_control_list": [acl_entry(principal, level)]})
 
@@ -288,10 +300,10 @@ class StatementFailed(Exception):
         self.code = code
 
 
-def acl_entry(principal: str, level: str) -> dict[str, str]:
-    """A workspace ACL entry: an email is a user, anything else a group."""
-    field = "user_name" if "@" in principal else "group_name"
-    return {field: principal, "permission_level": level}
+def acl_entry(principal: Principal, level: str) -> dict[str, str]:
+    """AUTH-012: map the verified principal type to the workspace ACL field."""
+    field = {"user": "user_name", "service_principal": "service_principal_name", "group": "group_name"}[principal["type"]]
+    return {field: principal["name"], "permission_level": level}
 
 
 def split_full_name(full_name: str) -> tuple[str, str, str]:

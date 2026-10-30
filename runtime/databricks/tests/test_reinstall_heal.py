@@ -30,7 +30,7 @@ from tests.recorded_workspace import RecordedServer
 from tests.test_app_manifest import MANIFEST, ROUTE, FOLDER
 
 LIVE = json.loads((Path(__file__).parent / "fixtures" / "reinstall" / "answers.json").read_text())
-APP_SP = LIVE["app_principal"]
+APP_SP = LIVE["agent_principal"]["name"]
 CATALOG, SCHEMA = "workspace", "br_b11"
 ARTIFACTS = f"{CATALOG}.{SCHEMA}.benchrouter_artifacts"
 RESULTS_VOLUME = f"{CATALOG}.{SCHEMA}.benchrouter_results"
@@ -118,8 +118,8 @@ class ResultsTableOwnedByTheCustomer(unittest.TestCase):
     def setUp(self) -> None:
         self.server = RecordedServer({STATEMENTS: LIVE["statement_succeeded"]})
         self.ctx = Context(self.server.workspace(), "benchrouter", 99)
-        self.payload = {"object": "results_table", "table": RESULTS_TABLE, "warehouse_id": "recorded", "app_principal": APP_SP,
-                        "columns": [{"name": "written_at", "type": "TIMESTAMP"}], "read_principals": ["nav@benchrouter.com"]}
+        self.payload = {"object": "results_table", "table": RESULTS_TABLE, "warehouse_id": "recorded", "agent_principal": {"type": "service_principal", "name": APP_SP},
+                        "columns": [{"name": "written_at", "type": "TIMESTAMP"}], "read_principals": [{"type": "user", "name": "nav@benchrouter.com"}]}
 
     def tearDown(self) -> None:
         self.server.close()
@@ -267,9 +267,9 @@ class DisconnectDropsTheVolumes(unittest.TestCase):
         })
         try:
             disconnect(Context(server.workspace(), "benchrouter", 99), {
-                "results_owner": "nav@benchrouter.com", "warehouse_id": "recorded", "results_table": RESULTS_TABLE,
+                "results_owner": {"type": "user", "name": "nav@benchrouter.com"}, "warehouse_id": "recorded", "results_table": RESULTS_TABLE,
                 "experiment_path": "/Shared/benchrouter/dbxb_8b", "scope": "benchrouter", "agent_job_id": 99,
-                "eval_job_id": 5150, "exposures": [], "volumes": [ARTIFACTS, RESULTS_VOLUME], "app_principal": APP_SP,
+                "eval_job_id": 5150, "exposures": [], "volumes": [ARTIFACTS, RESULTS_VOLUME], "agent_principal": {"type": "service_principal", "name": APP_SP},
             })
             steps = [(method, path) for method, path in server.paths() if method != "GET"]
         finally:
@@ -296,9 +296,9 @@ class DisconnectKeepsATableTheAppSpDoesNotOwn(unittest.TestCase):
         })
         try:
             outcome = disconnect(Context(server.workspace(), "benchrouter", 99), {
-                "results_owner": "nav@benchrouter.com", "warehouse_id": "recorded", "results_table": RESULTS_TABLE,
+                "results_owner": {"type": "user", "name": "nav@benchrouter.com"}, "warehouse_id": "recorded", "results_table": RESULTS_TABLE,
                 "experiment_path": "/Shared/benchrouter/dbxb_8b", "scope": "benchrouter", "agent_job_id": 99,
-                "exposures": [], "volumes": [], "app_principal": APP_SP,
+                "exposures": [], "volumes": [], "agent_principal": {"type": "service_principal", "name": APP_SP},
             })
             statements = [body["statement"] for _, path, _, body in server.calls if path == "/api/2.0/sql/statements"]
         finally:
