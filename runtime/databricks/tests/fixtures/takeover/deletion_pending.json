@@ -1,0 +1,7 @@
+{
+  "_comment": "H3 explicitly requires RESOURCE_ALREADY_EXISTS after delete to remain unreported. This code-only race variant was not observed in t9-endpoint-replace.txt (create try 1 succeeded). No CLI message is invented.",
+  "status": 400,
+  "body": {
+    "error_code": "RESOURCE_ALREADY_EXISTS"
+  }
+}

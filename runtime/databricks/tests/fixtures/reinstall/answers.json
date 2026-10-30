@@ -1,6 +1,6 @@
 {
   "_source": "B11 smoke 8b, 2026-10-29, test workspace, release 0.2.2: a reinstall. Disconnect with br-b11-app (results owner nav@benchrouter.com), delete that app (its SP goes), install br-b11-app2 (new SP 4d9ee9dd-3c40-43c3-8e7a-fd45442f3466, display name 'app-1vmkr0 br-b11-app2'), Connect on workspace.br_b11. Recorded by job runs that ran as the new SP (probe runs 990896844118553 and 69165261363365) and as the workspace admin. Status, error_code and message are verbatim. Success bodies were recorded by status (and owner) only, so a success body here holds only the fields the code reads. The admin probe printed a volume whose owner SP was deleted as owner 'unknown'. No case content.",
-  "app_principal": "4d9ee9dd-3c40-43c3-8e7a-fd45442f3466",
+  "agent_principal": {"type": "service_principal", "name": "4d9ee9dd-3c40-43c3-8e7a-fd45442f3466"},
   "export_unshared": {
     "status": 404,
     "body": {
