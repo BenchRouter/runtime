@@ -17,6 +17,7 @@ import {
   type RunnerCallRole,
   type RunnerEvalCallHeader,
   type RunnerEvaluatorRuntime,
+  type RunnerExecutableTiming,
   type RunnerWorkFailCause,
   type RunnerWorkItem
 } from "../../src/shared/runner-protocol";
@@ -115,7 +116,7 @@ export interface BatchOutcome {
 }
 
 export type ItemOutcome =
-  | { kind: "upload"; rows: UploadRow[]; quality: JsonObject | null; metrics?: ReplayMetrics[]; batch?: BatchOutcome; evaluatorRuntime?: RunnerEvaluatorRuntime | null }
+  | { kind: "upload"; rows: UploadRow[]; quality: JsonObject | null; metrics?: ReplayMetrics[]; batch?: BatchOutcome; evaluatorRuntime?: RunnerEvaluatorRuntime | null; timing?: RunnerExecutableTiming }
   | {
     kind: "fail"; cause: RunnerWorkFailCause; diagnostics: JsonObject; providerOnly: boolean; metrics?: ReplayMetrics[];
     /** RUN-001 §3.11: a failed evaluator's scrubbed stderr excerpt, for the job summary only; never sent (DATA-001). */

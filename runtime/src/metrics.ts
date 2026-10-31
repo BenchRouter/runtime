@@ -11,7 +11,8 @@ const MAX_CHECK_BYTES = 4096;
 const MAX_ROW_BYTES = 32 * 1024;
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
 const MAX_JOB_BYTES = 64 * 1024 * 1024;
-const MAX_JOB_FILES = 256;
+// RUN-001 (repo work queue §8.2): a job runs many more items now, so the file count is higher; the byte bound stays.
+const MAX_JOB_FILES = 2048;
 const MAX_ROWS = 4096;
 
 export interface ReplayMetrics {

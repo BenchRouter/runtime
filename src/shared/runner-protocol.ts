@@ -171,7 +171,13 @@ export type RunnerReplaySemanticsFeature = (typeof RUNNER_REPLAY_SEMANTICS_FEATU
  * the job's runtime version with the manifest's `runtime_version`. The server imports and leases a
  * package-runner route only to a session that advertised it.
  */
-export const RUNNER_FEATURE_CAPABILITIES = ["case_subset", "case_repeats", "pnpm_install", "package_runner_launch", ...RUNNER_REPLAY_SEMANTICS_FEATURES] as const;
+/**
+ * RUN-001 `executable_queue`: the runtime runs executable items one at a time in one job, resetting
+ * the tree between them, and may lease the next item after the last ended. The server leases a
+ * second executable item only to a session that advertised it. The runtime leaves it out when the
+ * eval job declares `services`.
+ */
+export const RUNNER_FEATURE_CAPABILITIES = ["case_subset", "case_repeats", "pnpm_install", "package_runner_launch", "executable_queue", ...RUNNER_REPLAY_SEMANTICS_FEATURES] as const;
 export type RunnerFeatureCapability = (typeof RUNNER_FEATURE_CAPABILITIES)[number];
 
 /**
@@ -814,6 +820,12 @@ export interface RunnerWorkItem {
   retry_attempt: number;
   mode: RunnerWorkMode;
   route_id: string;
+  /**
+   * RUN-001 (repo work queue §10): the route's key, the `route_id` of its entry in `.benchrouter/benchrouter.yml`.
+   * A Databricks pool run selects the manifest by this field, per item. GitHub runtimes ignore it, so the
+   * runtime's parser does not read it and a signed runtime stays unchanged.
+   */
+  route_key?: string;
   route_generation: number;
   route_ctx: RunnerRouteContext;
   auth_origin: RunnerAuthorityOrigin;
@@ -847,7 +859,16 @@ export interface RunnerClaimRequest {
   session_id: string;
   claim_seq: number;
   slots_free: number;
+  /**
+   * RUN-001 (repo work queue §8.3): the runtime stops the job because an item left residue (a new
+   * process, a dirty tree, a lost lease or a `setup_failed` receipt). The claim leases nothing and
+   * closes the session `job_residue` with a wake row.
+   */
+  job_end_reason?: RunnerJobEndReason;
 }
+
+export const RUNNER_JOB_END_REASONS = ["residue"] as const;
+export type RunnerJobEndReason = (typeof RUNNER_JOB_END_REASONS)[number];
 
 /** §3.4: why a session exits without `complete`. */
 export const RUNNER_EXIT_REASONS = ["idle", "retiring", "long_hold", "fenced"] as const;
@@ -947,6 +968,18 @@ export interface RunnerUploadRequest {
    * display and audit; never part of eval identity, reuse or carry.
    */
   evaluator_runtime?: RunnerEvaluatorRuntime;
+  /**
+   * Executable items only, optional: how long this item's install took and how long the clean after
+   * the job's previous item took (absent on a job's first item). Recorded beside `evaluator_runtime`
+   * for the queue report; never part of eval identity, reuse or carry.
+   */
+  timing?: RunnerExecutableTiming;
+}
+
+/** RUN-001 (repo work queue §8.2): per-item install and previous-clean milliseconds. */
+export interface RunnerExecutableTiming {
+  install_ms: number;
+  previous_clean_ms?: number;
 }
 
 /** EVAL-012: the runtime an executable evaluator ran on. */
@@ -1120,4 +1153,12 @@ export interface RunnerTrustFile {
   protocol_major: RunnerProtocolMajor;
   keys: { current: RunnerTrustKey; next: RunnerTrustKey };
   pins: Sha256Digest[];
+}
+
+/** RUN-001: a scheduling choice, not eval identity. `job` takes the `isolated` pool lane (one item, one fresh job). */
+export const EVAL_ISOLATIONS = ["process", "job"] as const;
+export type EvalIsolation = (typeof EVAL_ISOLATIONS)[number];
+
+export function isEvalIsolation(value: JsonValue | undefined): value is EvalIsolation {
+  return EVAL_ISOLATIONS.some((entry) => entry === value);
 }

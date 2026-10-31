@@ -11,7 +11,7 @@
 // Every child is killed (SIGTERM, then SIGKILL after 5 s) at its deadline.
 import type { ChildProcess } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
-import { access, readFile, realpath, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import path from "node:path";
 import type { EvalExecutionFailureReason } from "../../src/shared/failure-codes";
 import {
@@ -19,6 +19,7 @@ import {
   RUNNER_EXECUTABLE_LAUNCHERS,
   RUNNER_PNPM_LOCKFILE,
   type RunnerEvaluatorRuntime,
+  type RunnerExecutableTiming,
   type RunnerWorkItem,
   type Sha256Digest
 } from "../../src/shared/runner-protocol";
@@ -45,6 +46,8 @@ export interface ExecutableEnvironment {
   /** AUTH-007: the evaluator secrets every route of the manifest declares; none reaches the install. */
   evaluatorSecretNames: readonly string[];
   signal: AbortSignal;
+  /** RUN-001 (repo work queue §8.2): how long the clean after the job's previous item took; absent on its first item. */
+  previousCleanMs?: number;
 }
 
 interface ProcessOutcome {
@@ -159,7 +162,13 @@ async function installArgv(executable: ExecutableSpec, searchPath: string): Prom
   if ((await resolveOnPath("pnpm", searchPath)) === null) {
     throw new ItemFault("harness_failed", "the route's lockfile is pnpm-lock.yaml, but pnpm is not on PATH; set pnpm up in the workflow's customer-setup block (for example with pnpm/action-setup or corepack enable)");
   }
-  return ["pnpm", "install", "--frozen-lockfile", "--ignore-scripts"];
+  // EVAL-012: the package files are copied and both directories stay in the tree, so a write to a
+  // package file reaches no store, and the next model's clean and install cannot bring it back.
+  return [
+    "pnpm", "install", "--frozen-lockfile", "--ignore-scripts",
+    "--package-import-method=copy", "--modules-dir=node_modules", "--virtual-store-dir=node_modules/.pnpm",
+    "--config.enableGlobalVirtualStore=false"
+  ];
 }
 
 function abortFault(signal: AbortSignal): ItemFault {
@@ -208,7 +217,9 @@ export async function runExecutableItem(env: ExecutableEnvironment): Promise<Ite
   }
   // EVAL-012: the install runs where the lockfile is, which is working_directory or a workspace root above it.
   const installDir = executable.lockfileDirectory === null ? treeRoot : path.join(treeRoot, executable.lockfileDirectory);
+  const installStartedAt = Date.now();
   const installRun = await runGroup(await installArgv(executable, pinnedPath), installDir, install, workDeadlineAt, signal);
+  const installMs = Date.now() - installStartedAt;
   // RUN-001 §3.3.1 (#577): an install that overruns the work deadline is a failed install, whichever
   // deadline timer fired first. The server never holds a failed install: a slow registry heals by itself.
   // Any other abort (a lost lease, a retiring job) keeps its own cause.
@@ -219,10 +230,36 @@ export async function runExecutableItem(env: ExecutableEnvironment): Promise<Ite
   // 2. §3.2: the install must not change a declared file.
   if (!sameHashes(await hashDeclaredFiles(treeRoot, route), env.fileHashes)) throw new ItemFault("tree_mutated", "the dependency install changed a declared file");
 
-  // 3. The evaluator: the eval-call contract plus the declared secret names, nothing else.
+  // 3. The evaluator: the eval-call contract plus the declared secret names, nothing else. Its TMPDIR is
+  // private to the item and removed when the item ends; a path outside TMPDIR is not reset.
+  await mkdir(control.runnerTemp, { recursive: true });
+  const itemTmp = await mkdtemp(path.join(control.runnerTemp, "br-item-"));
+  try {
+    return await runEvaluator(env, { executable, pinnedPath, launcherBinary, itemTmp, workDir, workDeadlineAt, evaluatorRuntime, installMs });
+  } finally {
+    await rm(itemTmp, { recursive: true, force: true });
+  }
+}
+
+interface EvaluatorStage {
+  executable: ExecutableSpec;
+  pinnedPath: string;
+  launcherBinary: string;
+  itemTmp: string;
+  workDir: string;
+  workDeadlineAt: number;
+  evaluatorRuntime: RunnerEvaluatorRuntime | null;
+  installMs: number;
+}
+
+/** Steps 3 and 4 of an executable item: the evaluator process and its result receipt. */
+async function runEvaluator(env: ExecutableEnvironment, stage: EvaluatorStage): Promise<ItemOutcome> {
+  const { control, route, item, treeRoot, signal } = env;
+  const { executable, pinnedPath, launcherBinary, itemTmp, workDir, workDeadlineAt, evaluatorRuntime, installMs } = stage;
   const baseUrl = control.apiOrigin;
   const evaluatorEnv: StringMap = childEnv(control, {
     PATH: pinnedPath,
+    TMPDIR: itemTmp,
     BENCHROUTER_API_KEY: item.call_token,
     BENCHROUTER_EVAL_BASE_URL: baseUrl,
     BENCHROUTER_ROUTE_ID: route.routeId
@@ -255,7 +292,8 @@ export async function runExecutableItem(env: ExecutableEnvironment): Promise<Ite
 
   // 4. The result receipt.
   const receipt = await readReceipt(path.join(treeRoot, executable.resultPath), executable.primaryMetric, item.model_run.model);
-  return { kind: "upload", rows: receipt.rows, quality: receipt.quality, evaluatorRuntime };
+  const timing: RunnerExecutableTiming = env.previousCleanMs === undefined ? { install_ms: installMs } : { install_ms: installMs, previous_clean_ms: env.previousCleanMs };
+  return { kind: "upload", rows: receipt.rows, quality: receipt.quality, evaluatorRuntime, timing };
 }
 
 /** The first executable `name` on PATH, as found there (a multi-call binary such as `bunx` keeps its name). */

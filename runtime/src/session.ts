@@ -26,12 +26,12 @@ import {
 import { readFile } from "node:fs/promises";
 import { loadReplayCases } from "./cases";
 import type { ControlContext } from "./control";
-import { ancestryProof, fetchEvalTree } from "./eval-tree";
+import { ancestryProof, cleanEvalTree, fetchEvalTree } from "./eval-tree";
 import { runExecutableItem } from "./executable";
 import { canonicalJson, errorMessage, objectOf, parseJsonText, ProtocolError, readString, sha256Digest, sleep, type JsonObject } from "./json";
 import { isJsonString } from "../../src/shared/json-parse-contracts";
 import { readManifest, type ManifestRoute } from "./manifest";
-import { killAllGroups } from "./processes";
+import { killAllGroups, listProcesses, residuePids, systemOrphanPids, type ProcessTable } from "./processes";
 import { ItemFault, runReplayItem, type ItemOutcome } from "./replay";
 import { RunnerApiError, RunnerClient } from "./runner-client";
 import { hashDeclaredFiles, routeContract, sameHashes } from "./snapshot";
@@ -58,6 +58,21 @@ function batchCaseIds(item: RunnerWorkItem): string[] | null {
   return item.case_selection !== null && item.case_selection.kind === "subset" ? item.case_selection.case_ids : null;
 }
 const UNHEALTHY_BEAT_MS = 5_000;
+/** RUN-001 (repo work queue §8.3): how long a finished item's stray processes get to exit before the residue diff. */
+const RESIDUE_SETTLE_MS = 1_000;
+/** A process seen as residue must still be there this long after, or it was only exiting. */
+const RESIDUE_RECHECK_MS = 500;
+
+/** RUN-001 (repo work queue §8.2): what the job carries from one executable item to the next. */
+interface BatchState {
+  /** How long the clean after the last executable item took; absent before the job's first clean. */
+  previousCleanMs?: number;
+}
+
+/** What an item leaves for the job: a reason ends the job (§8.3), null lets it claim again. */
+interface ItemEnd {
+  endJob: string | null;
+}
 
 interface LeaseState {
   item: RunnerWorkItem;
@@ -213,6 +228,9 @@ export async function runWorker(control: ControlContext): Promise<number> {
   try {
     if (!control.oidc || !control.repository) throw new ProtocolError("`run` needs GitHub Actions OIDC (permissions: id-token: write) and GITHUB_REPOSITORY");
     const kit = await readCommittedKit(control.controlRoot);
+    // RUN-001 (repo work queue §8.5): a runtime may advertise less than its signed manifest. An eval job
+    // that declares `services` keeps one executable item per job, so it leaves the feature out.
+    if (kit.declaresServices) control.features = control.features.filter((feature) => feature !== "executable_queue");
     const oidcToken = await requestOidcToken(control.oidc.url, control.oidc.token, `benchrouter:repo:${control.repository}:hello`, holds);
     const hello = await client.hello(oidcToken, {
       protocol: RUNNER_PROTOCOL_MAJOR,
@@ -335,6 +353,12 @@ async function claimLoop(
   const retireAt = Date.parse(hello.retire_at ?? "");
   const metrics = new ReplayMetricsWriter(control.workspace);
   const running = new Map<string, Promise<void>>();
+  // RUN-001 (repo work queue §8.2): with `executable_queue` an executable item runs alone, and the job
+  // claims the next one after the tree is reset. Without it the job stops after one item, as before.
+  const batching = control.features.includes("executable_queue");
+  const batch: BatchState = {};
+  let executableRunning = false;
+  let jobEnd: string | null = null;
   let claimSeq = 0;
   let claimErrors = 0;
   let stop: string | null = null;
@@ -356,8 +380,20 @@ async function claimLoop(
         summary.outcome = stop;
         summary.note("the server offered no work within idle_exit_s; this worker exits by itself");
       }
+      if (stop === null && jobEnd !== null && running.size === 0) {
+        // §8.3: the finished item's upload stands. The job claims nothing more and tells the server why.
+        summary.note(`this job ends: ${jobEnd}`);
+        try {
+          await client.claim({ session_id: hello.session_id, claim_seq: claimSeq + 1, slots_free: 1, job_end_reason: "residue" });
+        } catch {
+          // The session then ends by its own idle or liveness expiry; the job stops either way.
+        }
+        claimSeq += 1;
+        stop = `job ended: ${jobEnd}`;
+        continue;
+      }
       const free = RUNNER_REPLAY_SLOTS - running.size;
-      if (stop !== null || free <= 0 || !heartbeat.healthy) {
+      if (stop !== null || free <= 0 || !heartbeat.healthy || executableRunning) {
         if (running.size === 0 && stop !== null) break;
         await waitForAny(1000);
         continue;
@@ -380,12 +416,17 @@ async function claimLoop(
             // §3.4: an executable item runs alone, in its own fresh job. It never shares a
             // session with replay work, and the job claims nothing after it.
             let refusal: ItemFault | null = null;
-            if (item.mode === "repository_executable") {
+            const executable = item.mode === "repository_executable";
+            if (executable) {
               if (running.size > 0 || response.items.length > 1) refusal = new ItemFault("mode_unsupported", "executable work never shares a job with other work");
-              stop = "an executable item runs alone in a fresh job";
+              if (!batching || refusal !== null) stop = "an executable item runs alone in a fresh job";
+              else executableRunning = true;
             }
             const key = leaseKey(item);
-            const promise = runItem(control, client, holds, heartbeat, prepared, item, summary, refusal, metrics).finally(() => {
+            const promise = runItemTurn(control, client, holds, heartbeat, prepared, item, summary, refusal, metrics, batch, executable && batching).then((end) => {
+              if (end.endJob !== null && jobEnd === null) jobEnd = end.endJob;
+            }).finally(() => {
+              if (executable) executableRunning = false;
               running.delete(key);
               lastLeaseAt = Date.now();
             });
@@ -448,15 +489,17 @@ async function runItem(
   item: RunnerWorkItem,
   summary: JobSummary,
   refusal: ItemFault | null,
-  metrics: ReplayMetricsWriter
-): Promise<void> {
+  metrics: ReplayMetricsWriter,
+  batch: BatchState
+): Promise<ItemEnd> {
+  let end: ItemEnd = { endJob: null };
   const lease = heartbeat.add(item);
   const deadlineTimer = setTimeout(() => lease.controller.abort(new ItemFault("deadline_exceeded", "the work deadline passed")), Math.max(0, Date.parse(item.work_deadline_at) - Date.now()));
   deadlineTimer.unref();
   let outcome: ItemOutcome;
   try {
     if (refusal !== null) throw refusal;
-    outcome = await executeItem(control, holds, heartbeat, lease, prepared, item);
+    outcome = await executeItem(control, holds, heartbeat, lease, prepared, item, batch);
   } catch (error) {
     const fault = error instanceof ItemFault ? error : new ItemFault("runtime_error", errorMessage(error instanceof Error ? error : String(error)));
     outcome = { kind: "fail", cause: fault.cause, diagnostics: { message: fault.message.slice(0, 500) }, providerOnly: false, metrics: fault.metrics };
@@ -464,7 +507,11 @@ async function runItem(
     clearTimeout(deadlineTimer);
   }
   try {
-    const terminal = await commit(control, client, item, outcome, summary, prepared.get(item.contract_digest)?.fileHashes ?? {});
+    const committed = await commit(control, client, item, outcome, summary, prepared.get(item.contract_digest)?.fileHashes ?? {});
+    const terminal = committed.terminal;
+    // §8.3: a lost lease or a `setup_failed` receipt ends the job after this item.
+    if (committed.endJob !== null) end = { endJob: committed.endJob };
+    else if (outcome.kind === "fail" && outcome.cause === "lease_lost") end = { endJob: "the lease was lost" };
     if (outcome.metrics) {
       try {
         await metrics.write(item.work_id, item.retry_attempt, item.lease_gen, outcome.metrics, terminal);
@@ -481,6 +528,84 @@ async function runItem(
   } finally {
     heartbeat.remove(item);
   }
+  return end;
+}
+
+/**
+ * RUN-001 (repo work queue §8.2): one item and, for a batching executable item, what follows it. After
+ * the evaluator's group is gone and the result is uploaded or failed, the tree is cleaned (untracked and
+ * ignored files, `node_modules` included) and must be clean, and the same-UID process list must hold no
+ * process that was not there before. Either fault ends the job. An item that already ended the job
+ * skips both, because no further item runs here.
+ */
+async function runItemTurn(
+  control: ControlContext,
+  client: RunnerClient,
+  holds: TargetHolds,
+  heartbeat: Heartbeat,
+  prepared: Map<Sha256Digest, PreparedRoute>,
+  item: RunnerWorkItem,
+  summary: JobSummary,
+  refusal: ItemFault | null,
+  metrics: ReplayMetricsWriter,
+  batch: BatchState,
+  resets: boolean
+): Promise<ItemEnd> {
+  return guardedItemTurn(
+    resets,
+    () => runItem(control, client, holds, heartbeat, prepared, item, summary, refusal, metrics, batch),
+    async () => {
+      const startedAt = Date.now();
+      const clean = await cleanEvalTree(control, `${control.workspace}/.br-eval`);
+      batch.previousCleanMs = Date.now() - startedAt;
+      return clean;
+    }
+  );
+}
+
+/**
+ * RUN-001 (repo work queue §8.3): the process-list guard around one item. A list that cannot be read before the
+ * item (a container image with no `ps`) does not stop the item: it runs, and the job ends after it with the
+ * reason, because nothing can prove the next item starts clean.
+ */
+export async function guardedItemTurn(
+  resets: boolean,
+  run: () => Promise<ItemEnd>,
+  cleanTree: () => Promise<{ ok: true } | { ok: false; detail: string }>
+): Promise<ItemEnd> {
+  let before: ProcessTable | null = null;
+  let unreadable: string | null = null;
+  if (resets) {
+    try {
+      before = await listProcesses();
+    } catch (error) {
+      unreadable = `the process list could not be read (${errorMessage(error instanceof Error ? error : String(error))})`;
+    }
+  }
+  const end = await run();
+  if (!resets || end.endJob !== null) return end;
+  if (before === null) return { endJob: unreadable };
+  const clean = await cleanTree();
+  if (!clean.ok) return { endJob: `the tree is not clean after the item (${clean.detail.slice(0, 200)})` };
+  await sleep(RESIDUE_SETTLE_MS);
+  try {
+    const uid = process.getuid?.() ?? -1;
+    const strays = async (): Promise<number[]> => {
+      const after = await listProcesses();
+      return residuePids(before, after, process.pid, uid, await systemOrphanPids(before, after, process.pid, uid));
+    };
+    let stray = await strays();
+    if (stray.length > 0) {
+      // A short-lived process of someone else can be mid-exit in the first read. A daemon is still there a moment later.
+      await sleep(RESIDUE_RECHECK_MS);
+      const later = new Set(await strays());
+      stray = stray.filter((pid) => later.has(pid));
+    }
+    if (stray.length > 0) return { endJob: `${stray.length} new process(es) outlived the item (PID ${stray.slice(0, 5).join(", ")})` };
+  } catch (error) {
+    return { endJob: `the process list could not be read (${errorMessage(error instanceof Error ? error : String(error))})` };
+  }
+  return { endJob: null };
 }
 
 async function executeItem(
@@ -489,7 +614,8 @@ async function executeItem(
   heartbeat: Heartbeat,
   lease: LeaseState,
   prepared: Map<Sha256Digest, PreparedRoute>,
-  item: RunnerWorkItem
+  item: RunnerWorkItem,
+  batch: BatchState
 ): Promise<ItemOutcome> {
   const missing = item.requires.features.filter((feature) => !control.features.includes(feature));
   if (missing.length > 0) throw new ItemFault("capability_unsupported", `this runtime does not advertise ${missing.join(", ")}`);
@@ -510,7 +636,7 @@ async function executeItem(
   if (!sameHashes(await hashDeclaredFiles(treeRoot, entry.route), entry.fileHashes)) throw new ItemFault("tree_mutated", "a declared file changed after the snapshot");
   if (item.mode !== entry.route.mode) throw new ItemFault("mode_unsupported", `the item mode ${item.mode} does not match route ${entry.route.routeId}`);
   if (item.mode === "repository_executable") {
-    return runExecutableItem({ control, treeRoot, route: entry.route, item, fileHashes: entry.fileHashes, evaluatorSecretNames: entry.evaluatorSecretNames, signal: lease.controller.signal });
+    return runExecutableItem({ control, treeRoot, route: entry.route, item, fileHashes: entry.fileHashes, evaluatorSecretNames: entry.evaluatorSecretNames, signal: lease.controller.signal, previousCleanMs: batch.previousCleanMs });
   }
   const cases = await loadReplayCases(treeRoot, entry.route);
   return runReplayItem({
@@ -526,7 +652,13 @@ async function executeItem(
 }
 
 /** §3.3.1: one terminal write per item. A lost response is recovered from the receipt. */
-async function commit(control: ControlContext, client: RunnerClient, item: RunnerWorkItem, outcome: ItemOutcome, summary: JobSummary, fileHashes: Record<string, Sha256Digest>): Promise<MetricsTerminal> {
+interface Committed {
+  terminal: MetricsTerminal;
+  /** RUN-001 (repo work queue §8.3): why this item ends the job, if it does. */
+  endJob: string | null;
+}
+
+async function commit(control: ControlContext, client: RunnerClient, item: RunnerWorkItem, outcome: ItemOutcome, summary: JobSummary, fileHashes: Record<string, Sha256Digest>): Promise<Committed> {
   const batchIds = batchCaseIds(item);
   try {
     if (outcome.kind === "upload") {
@@ -547,6 +679,7 @@ async function commit(control: ControlContext, client: RunnerClient, item: Runne
       };
       // EVAL-012: the runtime the evaluator ran on, recorded with the evidence only.
       if (outcome.evaluatorRuntime) request.evaluator_runtime = outcome.evaluatorRuntime;
+      if (outcome.timing) request.timing = outcome.timing;
       if (batch !== undefined) {
         // §3.3.5: a batch call repeats its grant and names every case of it once.
         request.case_ids = batch.caseIds;
@@ -568,17 +701,17 @@ async function commit(control: ControlContext, client: RunnerClient, item: Runne
         } else {
           summary.failed(item.work_id, "upload_error", "infra", "the server recorded the upload as a failure");
         }
-        return "failed";
+        return { terminal: "failed", endJob: null };
       }
       if (committed.receipt.terminal === "accepted") {
         summary.stored(item.work_id, item.model_run.model, rows.length + failures.length, failures.length);
-        return "uploaded";
+        return { terminal: "uploaded", endJob: null };
       }
       summary.uploaded(
         item.work_id, item.model_run.model, outcome.rows.length, outcome.rows.filter((row) => row.pass).length,
         item.mode === "isolated_replay", committed.receipt.run_summary
       );
-      return "uploaded";
+      return { terminal: "uploaded", endJob: null };
     }
     const failure: RunnerFailRequest = {
       session_id: client.sessionId, work_id: item.work_id, lease_gen: item.lease_gen, retry_attempt: item.retry_attempt,
@@ -591,22 +724,22 @@ async function commit(control: ControlContext, client: RunnerClient, item: Runne
     if (committed.receipt.failure_reason === "setup_failed") {
       const message = outcome.diagnostics.message;
       summary.setupFailed(item.work_id, outcome.cause, item.model_run.model, isJsonString(message) && message.length > 0 ? message : outcome.cause, outcome.evaluatorError);
-      return "failed";
+      return { terminal: "failed", endJob: "a setup_failed receipt" };
     }
     summary.failed(item.work_id, outcome.cause, failureClass(outcome.cause, outcome.providerOnly), item.model_run.model);
     if (outcome.evaluatorError) summary.evaluatorError(item.work_id, outcome.evaluatorError);
-    return "failed";
+    return { terminal: "failed", endJob: null };
   } catch (error) {
     if (error instanceof RunnerApiError && error.code === "work_terminal" && error.receipt) {
       summary.note(`work ${item.work_id} was already ${error.receipt.terminal}`);
       // A winning receipt need not describe these local observations.
-      return "unconfirmed";
+      return { terminal: "unconfirmed", endJob: null };
     }
     if (error instanceof RunnerApiError && error.code === "fenced") {
       summary.failed(item.work_id, "lease_lost", "infra", "the server fenced the lease before the result committed");
-      return "unconfirmed";
+      return { terminal: "unconfirmed", endJob: "the lease was lost" };
     }
     summary.failed(item.work_id, outcome.kind === "upload" ? "upload_error" : "fail_error", "infra", errorMessage(error instanceof Error ? error : String(error)));
-    return "unconfirmed";
+    return { terminal: "unconfirmed", endJob: null };
   }
 }

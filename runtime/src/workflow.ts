@@ -18,6 +18,8 @@ export interface CommittedKit {
   kitFileHashes: Record<string, Sha256Digest>;
   /** Evaluator secret names the workflow grants to the runtime step (names only). */
   evaluatorSecretNames: string[];
+  /** RUN-001 (repo work queue §8.5): a job declares `services:`, so its session takes one executable item. */
+  declaresServices: boolean;
 }
 
 function toJson(value: JsonValue | undefined): JsonObject {
@@ -52,7 +54,9 @@ export async function readCommittedKit(controlRoot: string): Promise<CommittedKi
   for (const entry of pathList(on.push)) if (!workflowPaths.includes(entry)) workflowPaths.push(entry);
   const secretNames = new Set<string>();
   let installGrant = false;
+  let declaresServices = false;
   for (const job of Object.values(toJson(workflow.jobs))) {
+    if (toJson(job).services !== undefined) declaresServices = true;
     const steps = toJson(job).steps;
     for (const step of Array.isArray(steps) ? steps : []) {
       for (const [name, value] of Object.entries(toJson(toJson(step).env))) {
@@ -65,5 +69,5 @@ export async function readCommittedKit(controlRoot: string): Promise<CommittedKi
   const authority: RunnerAuthorityCapability[] = [];
   if (secretNames.size > 0) authority.push("evaluator_secrets");
   if (installGrant) authority.push("install_grant");
-  return { workflowPaths, authority, kitFileHashes, evaluatorSecretNames: [...secretNames].sort() };
+  return { workflowPaths, authority, kitFileHashes, evaluatorSecretNames: [...secretNames].sort(), declaresServices };
 }
