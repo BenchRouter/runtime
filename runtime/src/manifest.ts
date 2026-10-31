@@ -4,7 +4,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
-import { isExactRuntimeVersion, locateExecutableLockfile, type RunnerWorkMode } from "../../src/shared/runner-protocol";
+import { isEvalIsolation, isExactRuntimeVersion, locateExecutableLockfile, type EvalIsolation, type RunnerWorkMode } from "../../src/shared/runner-protocol";
 import { parseReplayCaseRepeatPolicy, type ReplayCaseRepeatPolicy } from "../../src/shared/replay-case-repeats";
 import { isJsonFiniteNumber, isJsonObject, isJsonString, ProtocolError, type JsonObject, type JsonValue } from "./json";
 
@@ -42,6 +42,8 @@ export interface ManifestRoute {
   bestModel: string;
   mode: RunnerWorkMode;
   executable: ExecutableSpec | null;
+  /** RUN-001: `process` (default) shares a job; `job` takes one fresh job per item. Not eval identity. */
+  isolation: EvalIsolation;
   judgeModel: string | null;
   /** `eval_pack.config_path`: the committed manifest file, hashed as part of the contract. */
   configPath: string;
@@ -178,6 +180,10 @@ function parseRoute(value: JsonValue, index: number): ManifestRoute {
   if (rawMode !== "isolated_replay" && repeats.policy !== null) {
     fail(`${prefix}.eval_pack.case_repeats`, "applies only to isolated_replay evals");
   }
+  if (pack.isolation !== undefined && pack.isolation !== null && !isEvalIsolation(pack.isolation)) {
+    fail(`${prefix}.eval_pack.isolation`, "must be process or job");
+  }
+  const isolation: EvalIsolation = pack.isolation === "job" ? "job" : "process";
   const executable = rawMode === "repository_executable" ? parseExecutable(pack, prefix) : null;
   // EVAL-014: the eval implementer declares the judge model. There is no default judge.
   const judgeModel = optionalString(pack.judge_model, `${prefix}.eval_pack.judge_model`);
@@ -191,6 +197,7 @@ function parseRoute(value: JsonValue, index: number): ManifestRoute {
     bestModel: requiredString(seed.incumbent_model, `${prefix}.seed.incumbent_model`),
     mode: rawMode,
     executable,
+    isolation,
     judgeModel,
     configPath: repoPath(pack.config_path, `${prefix}.eval_pack.config_path`),
     scorerPath: repoPath(pack.scorer, `${prefix}.eval_pack.scorer`),

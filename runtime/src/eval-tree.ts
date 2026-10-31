@@ -90,6 +90,20 @@ export async function fetchEvalTree(context: ControlContext, evalSha: string): P
 }
 
 /**
+ * RUN-001 (repo work queue §8.2): between executable items, delete every untracked and ignored file
+ * (`node_modules` included) and require a clean status. A tree that cannot be cleaned ends the job.
+ */
+export async function cleanEvalTree(context: ControlContext, root: string): Promise<{ ok: true } | { ok: false; detail: string }> {
+  try {
+    await gitOk(context, root, ["clean", "-ffdx", "-q"]);
+    const status = await gitOk(context, root, ["status", "--porcelain"]);
+    return status.length === 0 ? { ok: true } : { ok: false, detail: "the eval tree is not clean after the clean" };
+  } catch (error) {
+    return { ok: false, detail: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
  * §3.8: `descends` = last_imported_sha is an ancestor of eval_sha (vacuously true before
  * the first import); `is_head` = eval_sha is the remote default-branch head now.
  */
