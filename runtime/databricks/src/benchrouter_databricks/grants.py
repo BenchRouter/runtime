@@ -1,6 +1,6 @@
 """The grants an eval needs before it runs (plan section 4.4).
 
-As the app SP, before anything starts: the agent before `run-now` on every launch. It makes exactly
+As the agent SP, before anything starts: the agent before `run-now` on every launch. It makes exactly
 the reads the run makes: a refresh reads the folder's manifest and every file it declares, its
 cases table and its secrets, and writes BenchRouter's artifact volume (`check_eval`); work reads the
 frozen artifact from that volume and the secrets it declares (`check_frozen`). A run that still
@@ -17,13 +17,13 @@ tests/fixtures/reinstall/answers.json):
   every file while get-status still answers 200 for the folder, so a 404 is a refused read, not a
   missing file: the admin's Add eval read the manifest. Any 403 or 404 is `folder_read`;
 - the cases table: Unity Catalog `tables/get`, which answers 403 PERMISSION_DENIED without
-  SELECT, and 404 when the app SP can see no such table. Both are `table_select`. It needs no SQL
+  SELECT, and 404 when the agent SP can see no such table. Both are `table_select`. It needs no SQL
   warehouse, so a check never starts one;
 - each declared secret: `secrets/list` on its scope (key names only; a check never reads a value).
   A refused (403) or missing scope is `secret_scope_read`; a scope without the key is
   `secret_key_missing`;
 - BenchRouter's artifact volume: the Files API answers 403 PERMISSION_DENIED ("does not have
-  READ VOLUME") on a volume the app SP cannot read, for example one an earlier app's SP owned.
+  READ VOLUME") on a volume the agent SP cannot read, for example one an earlier agent SP owned.
   That is `volume_read`, which Connect heals (plan 4.2). A 404 for a file in a readable volume is
   a missing artifact, not a grant: the run reports it.
 
@@ -70,7 +70,7 @@ def _table(value: str) -> bool:
 
 
 def _refused(error: ApiError) -> bool:
-    """A permanent refusal of the app SP: a missing permission or an object it cannot see."""
+    """A permanent refusal of the agent SP: a missing permission or an object it cannot see."""
     return error.status == 403 or error.code == "PERMISSION_DENIED" or is_not_found(error)
 
 
@@ -83,7 +83,7 @@ def _grant(kind: str, **names: str) -> dict[str, str]:
 
 
 def _export(workspace: Workspace, folder: str, path: str) -> bytes | None:
-    """One file of the eval folder as the refresh exports it, or None when the app SP is refused.
+    """One file of the eval folder as the refresh exports it, or None when the agent SP is refused.
 
     A transient error propagates, so the caller tries again later. Any other refusal than 403 or
     404 (a file too large to export, say) is not a grant: the run reports it.
@@ -206,7 +206,7 @@ def check_frozen(workspace: Workspace, catalog: str, schema: str, digest: str, r
     run reads (runner.py).
 
     The work run reads no folder and no table, only its artifact in the artifact volume and the
-    secrets that artifact declares, so a work launch checks exactly that. A volume the app SP may not
+    secrets that artifact declares, so a work launch checks exactly that. A volume the agent SP may not
     read answers 403 (`volume_read`). B11 smoke 8b: the 0.2.2 check passed that 403 as "not a grant",
     and every work run then failed `tree_mutated`. The manifest is read through the Files API
     without its proof only to name the secrets; the item proves the whole artifact after its claim.

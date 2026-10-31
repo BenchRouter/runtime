@@ -1,6 +1,6 @@
 """The agent job's task: poll BenchRouter, apply each leased item, report it (plan 4.2).
 
-The job runs as the app SP on a schedule, with `max_concurrent_runs: 1`. Each run:
+The job runs as the agent SP on a schedule, with `max_concurrent_runs: 1`. Each run:
 1. tries its own key (`poll-key`) and every key a Connect left (`poll-key-<nonce>`), newest
    first, until BenchRouter accepts one. Each Connect writes its own name and never overwrites
    another's, and exactly one issued key is live, so no write order can strand the agent;
@@ -201,7 +201,7 @@ def follow_release(ctx: Context, release: Any) -> None:
 
     Updates are server-driven: a new release needs no admin visit. The job's environment, not
     this process's version, is compared, so a job that installs anything but the pinned release
-    URL (for example a wheel in a path the app SP can write) is repointed even at the same
+    URL (for example a wheel in a path the agent SP can write) is repointed even at the same
     version (plan 4.3). Only the environment dependency changes. A failure is logged, and the
     next poll tries again.
     """

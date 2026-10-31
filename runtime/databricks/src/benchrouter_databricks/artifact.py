@@ -36,14 +36,15 @@ class ArtifactMissing(Exception):
 
 
 class VolumeRefused(Exception):
-    """The app SP may not read or write BenchRouter's volume (no READ VOLUME): a grant, not the eval.
+    """The agent SP may not read or write BenchRouter's volume (no READ VOLUME): a grant, not the eval.
 
     Through the volume's FUSE mount the Files API's 403 arrives as PermissionError (B11 smoke 8b).
     """
 
 
 def volume_root(catalog: str, schema: str, volume: str) -> str:
-    return f"/Volumes/{catalog}/{schema}/{volume}"
+    # The mount point is Databricks' own; the variable lets a local test stand a directory in for it.
+    return f"{os.environ.get('BENCHROUTER_VOLUMES_ROOT', '/Volumes')}/{catalog}/{schema}/{volume}"
 
 
 def python_version() -> str:
@@ -122,7 +123,7 @@ def _exists(path: str) -> bool:
 def copy_planned(volume: str, digest: str, destination: str) -> dict[str, Any]:
     """Copies `<volume>/<digest>/` into a private directory and verifies every file there.
 
-    Raises ArtifactMissing when the artifact is not there, VolumeRefused when the app SP may not
+    Raises ArtifactMissing when the artifact is not there, VolumeRefused when the agent SP may not
     read the volume, and TreeMutated when a copied file or the digest does not match.
     """
     source = os.path.join(volume, digest)

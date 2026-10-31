@@ -40,6 +40,7 @@ def child_env(
     route_id: str,
     base_url_env: str | None,
     secrets: Mapping[str, str],
+    tmpdir: str | None = None,
 ) -> dict[str, str]:
     """The child's whole environment. Nothing from `parent_env` but the runtime version."""
     env = {
@@ -49,6 +50,9 @@ def child_env(
         "BENCHROUTER_EVAL_BASE_URL": api_base.rstrip("/"),
         "BENCHROUTER_ROUTE_ID": route_id,
     }
+    if tmpdir is not None:
+        # RUN-001 (repo work queue §8.3): the item's private temp directory, so a leftover file of route A is not in route B's.
+        env["TMPDIR"] = tmpdir
     runtime_version = parent_env.get(RUNTIME_VERSION_ENV)
     if runtime_version:
         env[RUNTIME_VERSION_ENV] = runtime_version

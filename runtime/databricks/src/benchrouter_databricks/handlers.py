@@ -10,11 +10,12 @@ its lease ends and BenchRouter hands it out again (at most five times).
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, cast
 
 from .transport import ApiError, with_retries
-from .workspace import Principal, PrincipalGrant, StatementFailed, Workspace, quote_full_name, quote_identifier, split_full_name
+from .workspace import Principal, PrincipalGrant, StatementFailed, Workspace, cast_parameter, quote_full_name, quote_identifier, split_full_name, statement_parameter
 
 # Plan section 4.5: the only column types a results table may declare.
 COLUMN_TYPES = {"STRING", "BIGINT", "DOUBLE", "BOOLEAN", "TIMESTAMP", "DATE", "DECIMAL(18,6)", "MAP<STRING, DOUBLE>"}
@@ -136,9 +137,11 @@ def launch(ctx: Context, payload: dict[str, Any]) -> Outcome:
     job_parameters = payload.get("job_parameters")
     if not isinstance(job_parameters, dict) or not all(isinstance(value, str) for value in job_parameters.values()):
         raise Failed("payload_invalid")
-    check = launch_check(ctx, payload)
-    if check is not None:
-        _require_grants(with_retries(check))
+    verdicts = pool_verdicts(ctx, payload)
+    if verdicts is None:
+        check = launch_check(ctx, payload)
+        if check is not None:
+            _require_grants(with_retries(check))
     run_id = permanent("run_now", lambda: ctx.workspace.run_now(
         integer(payload, "job_id"), job_parameters, text(payload, "idempotency_token")))
 
@@ -148,7 +151,50 @@ def launch(ctx: Context, payload: dict[str, Any]) -> Outcome:
         if isinstance(key, str) and key:
             with_retries(lambda: ctx.workspace.secret_put(ctx.scope, f"claim-{claim_id}", key))
 
-    return Outcome({"run_id": run_id}, release_key)
+    result: dict[str, Any] = {"run_id": run_id}
+    if verdicts is not None:
+        result["checked_evals"] = verdicts["checked"]
+        if verdicts["held"]:
+            result["held_evals"] = verdicts["held"]
+    return Outcome(result, release_key)
+
+
+def pool_verdicts(ctx: Context, payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Repo work queue §10: a pool launch checks every listed eval before `run-now` and reports which passed.
+
+    A failing eval is held for its grants and the others still run. The launch waits only when none passes: it
+    raises `GrantNeeded` with the trigger eval's grants (the first failing eval's when the trigger is not listed).
+    Returns None for a launch that lists no evals, which takes today's one-eval check.
+    """
+    from . import grants
+
+    listed = payload.get("evals")
+    if not isinstance(listed, list) or not listed:
+        return None
+    catalog, schema = optional_text(payload, "catalog"), optional_text(payload, "schema")
+    if catalog is None or schema is None:
+        return None
+    checked: list[str] = []
+    held: list[dict[str, Any]] = []
+    for entry in listed:
+        if not isinstance(entry, dict):
+            raise Failed("payload_invalid")
+        eval_id, digest, route_key = text(entry, "eval_id"), optional_text(entry, "artifact_digest"), optional_text(entry, "route_key")
+        if digest is None or route_key is None:
+            # BenchRouter found no eval row for it at the poll: it is not on this run's list.
+            continue
+        missing = with_retries(lambda digest=digest, route_key=route_key: grants.check_frozen(ctx.workspace, catalog, schema, digest, route_key))
+        if missing:
+            held.append({"eval_id": eval_id, "grants": missing})
+        else:
+            checked.append(eval_id)
+    if not checked:
+        trigger = optional_text(payload, "eval_id")
+        first = next((entry for entry in held if entry["eval_id"] == trigger), held[0] if held else None)
+        if first is None:
+            raise Failed("payload_invalid")
+        _require_grants(first["grants"])
+    return {"checked": checked, "held": held}
 
 
 def _require_grants(missing: list[dict[str, str]]) -> None:
@@ -160,9 +206,6 @@ def _require_grants(missing: list[dict[str, str]]) -> None:
 def launch_check(ctx: Context, payload: dict[str, Any]) -> Callable[[], list[dict[str, str]]] | None:
     """Plan 4.4: the check of what this launch's run will read, or None when the payload names no target
     (BenchRouter found no eval row for it at the poll), in which case the launch runs unchecked.
-
-    `grants` is imported here, not at the top: the app imports this module and never launches, so
-    the BenchRouter/databricks-app mirror needs no grant-check modules.
     """
     from . import grants
 
@@ -246,6 +289,109 @@ def run_sql(ctx: Context, warehouse_id: str, step: str, statement: str) -> None:
         permanent(step, lambda: ctx.workspace.execute_sql(warehouse_id, statement))
     except StatementFailed as error:
         raise Failed(sanitized_code(f"{step}_{error.code}")) from None
+
+
+# DATA-001 / plan 4.5 / repo work queue §10: the agent is the results table's only writer. One MERGE per candidate
+# model, once the set settles, from the server's summary and the serving run's local `run.json`. The key is
+# (`job_run_id`, `result_set_id`, `candidate_model`). Order is the summary's server time: a MERGE updates a row only
+# when its `written_at` (the summary's server time) is not older than the row's, so a `closed` item that retries late never replaces `published`.
+RESULTS_KEY_COLUMNS = ("job_run_id", "result_set_id", "candidate_model")
+RESULTS_SET_COLUMNS = {
+    "route_key": "STRING", "route_id": "STRING", "set_state": "STRING", "artifact_digest": "STRING", "acceptance_fingerprint": "STRING",
+    "chosen_model": "STRING", "decision": "STRING", "decision_reason": "STRING", "serving_model": "STRING",
+    "route_runtime_cost_usd_30d": "DECIMAL(18,6)", "benchrouter_url": "STRING",
+}
+RESULTS_ROW_COLUMNS = {
+    "role": "STRING", "measured": "BOOLEAN", "unmeasured_cause": "STRING", "cases": "BIGINT", "cases_passed": "BIGINT", "pass_rate": "DOUBLE",
+    "primary_metric": "STRING", "primary_score": "DOUBLE", "eval_cost_usd": "DECIMAL(18,6)", "latency_p50_ms": "DOUBLE",
+    "latency_p95_ms": "DOUBLE", "on_frontier": "BOOLEAN", "is_chosen": "BOOLEAN",
+}
+#: A summary with no observation leaves the measured value a run left in place.
+RESULTS_MEASURED_COLUMNS = {
+    "measured", "cases", "cases_passed", "pass_rate", "primary_metric", "primary_score",
+    "eval_cost_usd", "latency_p50_ms", "latency_p95_ms", "route_runtime_cost_usd_30d", "metrics",
+}
+RESULTS_COLUMN_ORDER = (
+    "written_at", "job_run_id", "claim_id", "route_key", "route_id", "result_set_id", "set_state", "artifact_digest",
+    "acceptance_fingerprint", "candidate_model", "role", "measured", "unmeasured_cause", "cases", "cases_passed", "pass_rate",
+    "primary_metric", "primary_score", "metrics", "eval_cost_usd", "eval_calls", "latency_p50_ms", "latency_p95_ms", "on_frontier",
+    "is_chosen", "chosen_model", "decision", "decision_reason", "serving_model", "route_runtime_cost_usd_30d", "route_runtime_calls_30d",
+    "benchrouter_url",
+)
+RESULTS_COLUMN_TYPES = {
+    "written_at": "TIMESTAMP", "job_run_id": "BIGINT", "claim_id": "STRING", "result_set_id": "STRING",
+    "candidate_model": "STRING", "metrics": "STRING", "eval_calls": "BIGINT", "route_runtime_calls_30d": "BIGINT",
+    **RESULTS_SET_COLUMNS, **RESULTS_ROW_COLUMNS,
+}
+
+
+def results_merge_statement(table: str) -> str:
+    """The one statement: insert a model's row, or update it when the summary is not older than the row's."""
+    def value(name: str) -> str:
+        if name == "metrics":
+            return "from_json(:metrics, 'MAP<STRING, DOUBLE>')"
+        return cast_parameter(name, RESULTS_COLUMN_TYPES[name])
+
+    selected = ", ".join(f"{value(name)} AS `{name}`" for name in RESULTS_COLUMN_ORDER)
+    on = " AND ".join(f"target.`{name}` <=> source.`{name}`" for name in RESULTS_KEY_COLUMNS)
+    updatable = [name for name in RESULTS_COLUMN_ORDER if name not in RESULTS_KEY_COLUMNS and name != "claim_id"]
+    assignments = ", ".join(
+        f"target.`{name}` = " + (f"COALESCE(source.`{name}`, target.`{name}`)" if name in RESULTS_MEASURED_COLUMNS else f"source.`{name}`")
+        for name in updatable
+    )
+    names = ", ".join(f"`{name}`" for name in RESULTS_COLUMN_ORDER)
+    sources = ", ".join(f"source.`{name}`" for name in RESULTS_COLUMN_ORDER)
+    return (f"MERGE INTO {quote_full_name(table)} AS target USING (SELECT {selected}) AS source ON {on} "
+            f"WHEN MATCHED AND (target.`written_at` IS NULL OR source.`written_at` >= target.`written_at`) THEN UPDATE SET {assignments} "
+            f"WHEN NOT MATCHED THEN INSERT ({names}) VALUES ({sources})")
+
+
+def results_row_parameters(payload: dict[str, Any], row: dict[str, Any], written_at: str, record: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Plan 4.5: one model's row, as statement parameters. The run's own metrics are NULL when its `run.json` is gone."""
+    metrics = record.get("metrics") if isinstance(record, dict) and record.get("model") == row.get("candidate_model") else None
+    values: dict[str, Any] = {
+        "written_at": written_at, "job_run_id": row.get("job_run_id"), "claim_id": row.get("claim_id"),
+        "result_set_id": payload.get("result_set_id"), "candidate_model": row.get("candidate_model"),
+        "metrics": json.dumps(metrics) if isinstance(metrics, dict) else None,
+        # The ledger does not keep per-route call counts per window yet (plan 4.4).
+        "eval_calls": None, "route_runtime_calls_30d": None,
+        **{name: payload.get(name) for name in RESULTS_SET_COLUMNS}, **{name: row.get(name) for name in RESULTS_ROW_COLUMNS},
+    }
+    return [statement_parameter(name, values[name], RESULTS_COLUMN_TYPES[name]) for name in RESULTS_COLUMN_ORDER]
+
+
+def results_update(ctx: Context, payload: dict[str, Any]) -> Outcome:
+    """Writes a settled set's rows: one MERGE per candidate model that a run served (repo work queue §10).
+
+    A set that no run served has no `job_run_id` on its rows and writes none. A repeat finds equal rows and
+    changes nothing.
+    """
+    from .results import read_run_record
+
+    warehouse_id = text(payload, "warehouse_id")
+    result_set_id = text(payload, "result_set_id")
+    rows = payload.get("rows")
+    written_at = payload.get("written_at")
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows) or not isinstance(written_at, str):
+        raise Failed("payload_invalid")
+    table_name = text(payload, "table")
+    try:
+        catalog, schema, _ = split_full_name(table_name)
+        statement = results_merge_statement(table_name)
+    except ValueError:
+        raise Failed("identifier_invalid") from None
+    statements_run = 0
+    for row in rows:
+        text(row, "candidate_model")
+        if not isinstance(row.get("job_run_id"), int) or not isinstance(row.get("claim_id"), str):
+            continue
+        work_id = row.get("work_id") if isinstance(row.get("work_id"), str) else None
+        record = read_run_record(catalog, schema, row["claim_id"], work_id)
+        parameters = results_row_parameters({**payload, "result_set_id": result_set_id}, row, written_at, record)
+        permanent("results_update", lambda: ctx.workspace.execute_sql(warehouse_id, statement, parameters))
+        statements_run += 1
+    # Recorded statement answers have no affected-row count. Do not infer a wire shape.
+    return Outcome({"object": "results_update", "rows_updated": statements_run})
 
 
 def setup_results_table(ctx: Context, payload: dict[str, Any]) -> Outcome:
@@ -427,6 +573,7 @@ SETUP_OBJECTS: dict[str, Callable[[Context, dict[str, Any]], Outcome]] = {
     "experiment": setup_experiment,
     "volume": setup_volume,
     "results_table": setup_results_table,
+    "results_update": results_update,
     "eval_job": setup_eval_job,
     "serving_endpoint": setup_serving_endpoint,
     # Plan 4.4: the claim-less re-check of an eval that waits for a grant (a setup item by object).
@@ -461,7 +608,7 @@ def drop_volumes(ws: Workspace, names: list[str]) -> None:
     They are BenchRouter's scratch: every receipt reached BenchRouter before the runner wrote the
     results volume, and a later Connect freezes the artifacts again. Unity Catalog's REST delete
     needs no SQL warehouse. A volume already gone (404) counts as deleted, and one the agent SP may
-    not delete (403) is not its own (an earlier app's SP made it), so both are skipped; any other
+    not delete (403) is not its own (an earlier agent SP made it), so both are skipped; any other
     refusal fails the item, which the next poll queues again.
     """
     for name in names:
