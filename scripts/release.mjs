@@ -96,18 +96,34 @@ function runtimePackage() {
   return { version, features: [...meta.features] };
 }
 
-// The databricks wheel's version is `[project] version` in runtime/databricks/pyproject.toml.
+// The databricks wheel's version is `[project] version` and its features are `[tool.benchrouter] features`
+// in runtime/databricks/pyproject.toml. The features are one line, `features = ["a", "b"]`. The hello check
+// refuses a wheel that advertises a feature its signed release does not declare, so the manifest must list them.
 function databricksPackage() {
   const lines = readFileSync(join(ROOT, "runtime", "databricks", "pyproject.toml"), "utf8").split("\n");
   let section = "";
+  let version = null;
+  let features = null;
   for (const line of lines) {
     const text = line.trim();
     if (text.startsWith("[")) section = text;
     else if (section === "[project]" && text.startsWith("version = \"") && text.endsWith("\"")) {
-      return { version: checkVersion(text.slice("version = \"".length, -1)), features: [] };
+      version = checkVersion(text.slice("version = \"".length, -1));
+    } else if (section === "[tool.benchrouter]" && text.startsWith("features = [") && text.endsWith("]")) {
+      features = text
+        .slice("features = [".length, -1)
+        .split(",")
+        .map((item) => item.trim())
+        .filter((item) => item.length > 0)
+        .map((item) => {
+          if (item.length < 3 || !item.startsWith("\"") || !item.endsWith("\"")) fail(`bad feature ${item} in [tool.benchrouter] features`);
+          return item.slice(1, -1);
+        });
     }
   }
-  fail("runtime/databricks/pyproject.toml has no [project] version");
+  if (version === null) fail("runtime/databricks/pyproject.toml has no [project] version");
+  if (features === null) fail("runtime/databricks/pyproject.toml has no [tool.benchrouter] features");
+  return { version, features };
 }
 
 function releasePackage() {
