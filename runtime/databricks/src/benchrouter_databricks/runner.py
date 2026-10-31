@@ -11,8 +11,13 @@ startup claim:
    runs alone: copy the planned artifact into a private directory and verify every file
    (`tree_mutated`), build the venv offline from the locked wheels (`install_failed`), run the
    evaluator child, map its assessments to the receipt, and upload, or fail with a fixed cause.
-5. Read the result summary until the set closes (at most 5 minutes) and leave it, with the
-   child's local MLflow store, in the results volume for the results task.
+5. Leave each item's record (`<results volume>/<claim>/<work_id>/run.json`) and the child's local MLflow
+   store beside it. The results task logs the MLflow data. The agent alone writes the results table, once
+   the set settles (handlers.results_update).
+
+A hello that advertises `executable_queue` and gets a queue session runs the binding pool's items one at a
+time, each from its own frozen artifact, private directory and venv, and claims until the server answers
+`exit`. Any other hello gets today's session: one item, then the job ends.
 
 The parent holds the bootstrap key and the session credential in memory only, imports no
 customer module and no MLflow, and logs fixed words and ids only.
@@ -40,6 +45,7 @@ from .canonical import canonical_json, sha256_digest
 from .child import Masker, child_env, run_child
 from .manifest import MANIFEST_NAME, ManifestError, load_manifest
 from .protocol import ProtocolError, RunnerApiError, RunnerClient
+from . import residue
 from .receipt import Case, Unmeasured, build_receipt, read_receipt
 from .refresh import run_refresh
 from .transport import ApiError, TransportError, with_retries
@@ -52,10 +58,14 @@ LOCAL_EXPIRY_MARGIN_S = 15
 #: Plan 4.3: the parent waits for its bootstrap key inside the 20-minute prepare deadline.
 KEY_WAIT_S = 20 * 60
 KEY_POLL_S = 5
-SUMMARY_POLL_S = 30
-SUMMARY_WAIT_S = 5 * 60
 IDLE_EXIT_GRACE = 1.25
+#: RUN-001 (repo work queue §6.1): a queue session also ends on its own idle clock, measured from its last lease. The
+#: limit is this multiple of the one-set limit (75 s at the default 60 s idle exit, so 120 s), so the server's `exit`
+#: normally arrives first.
+QUEUE_IDLE_FACTOR = 1.6
 INSTALL_TIMEOUT_S = 600
+#: A queue session wakes at least this often while it waits, so a session end shows within one beat.
+QUEUE_WAIT_MAX_S = 30.0
 PIP_ENV_NAMES = ("PATH", "HOME")
 
 
@@ -97,6 +107,9 @@ class Heartbeat:
         self._stop.set()
 
     def hold(self, item: dict[str, Any]) -> None:
+        # A queue session runs many items: an earlier item's lost lease must not abort this one.
+        if self.ended is None:
+            self.abort.clear()
         with self._lock:
             self.lease = item
             self.local_expiry = min(parse_time(item["lease_expires_at"]), time.time() + LEASE_TTL_S) - LOCAL_EXPIRY_MARGIN_S
@@ -140,6 +153,8 @@ class Heartbeat:
 
 
 class Runner:
+    queue_idle_factor = QUEUE_IDLE_FACTOR
+
     def __init__(self, args: dict[str, str]) -> None:
         self.claim = args["claim"]
         self.run_id = int(args["run_id"])
@@ -172,7 +187,7 @@ class Runner:
             "claim": self.claim,
             "bootstrap_version": __version__,
             "runtime_digest": self.runtime_digest,
-            "features": [],
+            "features": ["executable_queue"],
             "databricks_run_id": self.run_id,
         })
 
@@ -193,7 +208,7 @@ class Runner:
             log("hello ended", outcome=outcome, reason=answer.get("reason"))
             self.write_run({"outcome": f"hello_{outcome}", "reason": answer.get("reason")})
             return 0
-        log("session", session=answer["session_id"], purpose=answer.get("purpose"), revision=answer.get("revision"))
+        log("session", session=answer["session_id"], purpose=answer.get("purpose"), revision=answer.get("revision"), queue=answer.get("queue") is True)
         heartbeat = Heartbeat(self.client)
         heartbeat.start()
         try:
@@ -224,10 +239,14 @@ class Runner:
         if ready.get("outcome") != "live":
             log("ready ended", outcome=ready.get("outcome"), reason=ready.get("reason"))
             return 0
+        queue = hello.get("queue") is True
         idle_limit = max(1, int(hello.get("idle_exit_s") or 60)) * IDLE_EXIT_GRACE
+        if queue:
+            idle_limit *= self.queue_idle_factor
         last_lease = time.monotonic()
         claim_seq = 0
         while heartbeat.ended is None:
+            # A session ends by its own idle clock. A queue session normally ends first by the server's `exit`.
             if time.monotonic() - last_lease >= idle_limit:
                 log("exit idle")
                 return 0
@@ -236,26 +255,70 @@ class Runner:
             outcome = answer.get("outcome")
             if outcome == "run" and answer.get("items"):
                 items = answer["items"]
-                # An executable item runs alone, and the job claims nothing after it.
+                if queue:
+                    for item in items:
+                        stopped = self.queue_item(hello, item, digests, heartbeat)
+                        if stopped is not None:
+                            return self.end_job(stopped, claim_seq + 1)
+                    last_lease = time.monotonic()
+                    continue
+                # A one-set executable item runs alone, and the job claims nothing after it.
                 item = items[0]
                 refusal = None if len(items) == 1 else ItemFault("mode_unsupported", "executable_work_runs_alone")
                 self.item(hello, item, digests, heartbeat, refusal)
                 return 0
             if outcome == "run" or outcome == "wait_until":
                 until = parse_time(answer["until"]) if outcome == "wait_until" else time.time() + 1
-                time.sleep(max(0.0, min(until - time.time(), idle_limit - (time.monotonic() - last_lease))))
+                remaining = idle_limit - (time.monotonic() - last_lease)
+                bound = min(QUEUE_WAIT_MAX_S, remaining) if queue else remaining
+                time.sleep(max(0.0, min(until - time.time(), bound)))
                 continue
             log("claim ended", outcome=outcome, reason=answer.get("reason"), state=answer.get("state"))
+            if outcome == "exit":
+                log("exit", reason=answer.get("reason"))
             return 0
         log("session ended", outcome=heartbeat.ended)
+        return 0
+
+    def queue_item(self, hello: dict[str, Any], item: dict[str, Any], digests: list[str], heartbeat: Heartbeat) -> str | None:
+        """RUN-001 (repo work queue §8.3): one queue item inside the residue check. Returns why the session must end, or None.
+
+        A table that cannot be read before the item does not stop it: the item runs, and the session ends after it with
+        that reason, because nothing can prove the next item starts clean.
+        """
+        unreadable: str | None = None
+        try:
+            before: residue.Table | None = residue.list_processes()
+        except OSError:
+            before, unreadable = None, "process_table_unreadable"
+        self.item(hello, item, digests, heartbeat, None)
+        if heartbeat.ended is not None:
+            return None
+        if before is None:
+            return unreadable
+        try:
+            stray = residue.survivors(before)
+        except OSError:
+            return "process_table_unreadable"
+        return f"residue_{len(stray)}" if stray else None
+
+    def end_job(self, reason: str, claim_seq: int) -> int:
+        """Closes the session with one last claim, as the GitHub runtime does (`job_end_reason: residue`)."""
+        log("job ends", reason=reason)
+        try:
+            self.client.claim(claim_seq, 1, job_end_reason="residue")
+        except (RunnerApiError, TransportError, ProtocolError) as error:
+            log("job end claim failed", error=type(error).__name__)
         return 0
 
     def item(self, hello: dict[str, Any], item: dict[str, Any], digests: list[str], heartbeat: Heartbeat, refusal: ItemFault | None) -> None:
         heartbeat.hold(item)
         model = item["model_run"]["model"]
         log("item", work=item["work_id"], model=model)
+        # A queue item names its own artifact and route; a one-set session's item takes both from hello.
         record: dict[str, Any] = {"work_id": item["work_id"], "model": model, "result_set_id": item["model_run"]["result_set_id"],
-                                  "route_id": hello.get("route_key"), "artifact_digest": hello.get("eval_sha")}
+                                  "route_id": item.get("route_key") or hello.get("route_key"),
+                                  "artifact_digest": item.get("eval_sha") or hello.get("eval_sha")}
         with tempfile.TemporaryDirectory(prefix="benchrouter-item-") as private:
             os.chmod(private, 0o700)
             try:
@@ -288,7 +351,6 @@ class Runner:
                 record["outcome"] = f"refused_{error.code}"
             finally:
                 heartbeat.release()
-            record["summary"] = self.summary(item["model_run"]["result_set_id"])
             self.write_run(record, store=os.path.join(private, "home", "mlflow.db"))
         log("item done", work=item["work_id"], outcome=record["outcome"])
 
@@ -308,22 +370,24 @@ class Runner:
         deadline_at = parse_time(item["work_deadline_at"])
 
         # Copy the planned artifact into the private directory and prove every file. Only a copy that
-        # does not match its digest is `tree_mutated`. A volume the app SP may not read (B11 smoke 8b:
+        # does not match its digest is `tree_mutated`. A volume the agent SP may not read (B11 smoke 8b:
         # a reinstall's new SP, before Connect healed the volume) and an artifact that is gone are not
         # the eval's fault: each has its own fixed reason, which BenchRouter shows as its own or as
         # Connect's to fix (src/shared/failure-display.ts), never as "fix the eval".
         tree = os.path.join(private, "artifact")
+        copy_started = time.monotonic()
         try:
-            artifact = copy_planned(volume_root(self.catalog, self.schema, ARTIFACT_VOLUME), str(hello["eval_sha"]), tree)
+            artifact = copy_planned(volume_root(self.catalog, self.schema, ARTIFACT_VOLUME), str(item.get("eval_sha") or hello["eval_sha"]), tree)
         except VolumeRefused:
             raise ItemFault("harness_failed", "artifact_unreadable") from None
         except ArtifactMissing:
             raise ItemFault("harness_failed", "artifact_missing") from None
         except (TreeMutated, OSError):
             raise ItemFault("tree_mutated", "artifact_mismatch") from None
+        copy_s = time.monotonic() - copy_started
         files_root = os.path.join(tree, "files")
         # The manifest's `route_id` is the route key; the item's `route_id` is an internal id.
-        route_key = hello.get("route_key")
+        route_key = item.get("route_key") or hello.get("route_key")
         if not isinstance(route_key, str) or not route_key:
             raise ItemFault("harness_failed", "route_key_missing")
         try:
@@ -338,7 +402,11 @@ class Runner:
         if artifact.get("platform_tag") != platform_tag() or str(artifact.get("python_version")).split(".")[:2] != python_version().split(".")[:2]:
             raise ItemFault("install_failed", "python_or_platform_mismatch")
         venv = os.path.join(private, "venv")
+        venv_started = time.monotonic()
         self.build_venv(venv, os.path.join(files_root, "wheels"), os.path.join(files_root, manifest.requirements_lock), deadline_at)
+        venv_s = time.monotonic() - venv_started
+        # Repo work queue §10: what one item's own copy and install cost, so the live smoke can price a pool.
+        log("item timing", work=item["work_id"], copy_s=round(copy_s, 2), venv_s=round(venv_s, 2))
         if heartbeat.abort.is_set():
             raise ItemFault("lease_lost", "lease_lost")
 
@@ -355,9 +423,11 @@ class Runner:
 
         home = os.path.join(private, "home")
         os.makedirs(home, mode=0o700)
+        tmpdir = os.path.join(private, "tmp")
+        os.makedirs(tmpdir, mode=0o700)
         out = os.path.join(home, "results.json")
         env = child_env(os.environ, venv=venv, home=home, call_token=item["call_token"], api_base=self.api_base,
-                        route_id=route_key, base_url_env=manifest.base_url_env, secrets=secrets)
+                        route_id=route_key, base_url_env=manifest.base_url_env, secrets=secrets, tmpdir=tmpdir)
         argv = [os.path.join(venv, "bin", "python"), "-I", os.path.join(os.path.dirname(__file__), "evaluator.py"),
                 "--code-dir", files_root, "--cases", os.path.join(files_root, "cases.jsonl"),
                 "--predict", manifest.predict_file, manifest.predict_function,
@@ -414,27 +484,18 @@ class Runner:
 
     # 5. Results hand-off ------------------------------------------------------------------
 
-    def summary(self, result_set_id: str) -> dict[str, Any] | None:
-        """Plan 4.5: poll the result summary until the set closes, for at most 5 minutes."""
-        deadline = time.monotonic() + SUMMARY_WAIT_S
-        last: dict[str, Any] | None = None
-        while True:
-            try:
-                last = self.client.result_summary(result_set_id)
-            except (RunnerApiError, TransportError, ProtocolError) as error:
-                log("summary unavailable", error=getattr(error, "code", type(error).__name__))
-                return last
-            if last.get("set_state") in ("closed", "published") or time.monotonic() + SUMMARY_POLL_S > deadline:
-                return last
-            time.sleep(SUMMARY_POLL_S)
-
     def write_run(self, record: dict[str, Any], store: str | None = None) -> None:
-        """Leaves the run's record (and the child's local MLflow store) for the results task."""
+        """Leaves one item's record (and the child's local MLflow store) in its own folder, `<claim>/<work_id>/`.
+
+        The results task logs the MLflow data. The agent reads `run.json` as data when the set settles. A
+        record with no work item (a hello that ended) is `<claim>/run.json`.
+        """
+        folder = os.path.join(self.results_dir, str(record["work_id"])) if record.get("work_id") else self.results_dir
         try:
-            os.makedirs(self.results_dir, exist_ok=True)
+            os.makedirs(folder, exist_ok=True)
             if store is not None and os.path.exists(store):
-                shutil.copyfile(store, os.path.join(self.results_dir, "mlflow.db"))
-            with open(os.path.join(self.results_dir, "run.json"), "w", encoding="utf-8") as handle:
+                shutil.copyfile(store, os.path.join(folder, "mlflow.db"))
+            with open(os.path.join(folder, "run.json"), "w", encoding="utf-8") as handle:
                 json.dump({"claim_id": self.claim, "job_run_id": self.run_id, **record}, handle)
         except OSError as error:
             log("results write failed", error=type(error).__name__)

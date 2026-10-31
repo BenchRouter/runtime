@@ -21,7 +21,7 @@ class ApiError(Exception):
     """An HTTP answer outside 2xx. `code` is the API's error code when the body names one.
 
     `detail` is the error object of the body (BenchRouter's `error`, or Databricks' whole body),
-    for the app to show to the admin. The agent never logs it.
+    for the CLI to show to the admin. The agent never logs it.
     """
 
     def __init__(self, status: int, code: str | None, detail: dict[str, Any] | None = None) -> None:

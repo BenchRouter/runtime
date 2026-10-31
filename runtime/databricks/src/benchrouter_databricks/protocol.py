@@ -162,11 +162,13 @@ class RunnerClient:
         session_id, credential = self._auth()
         return self._post(ENDPOINTS["ready"], {"session_id": session_id, "contract_digests": contract_digests}, credential, f"{session_id}:ready")
 
-    def claim(self, claim_seq: int, slots_free: int) -> dict[str, Any]:
-        """A retried claim with the same claim_seq returns the same items."""
+    def claim(self, claim_seq: int, slots_free: int, job_end_reason: str | None = None) -> dict[str, Any]:
+        """A retried claim with the same claim_seq returns the same items. `job_end_reason` closes the session (§8.3)."""
         session_id, credential = self._auth()
-        return self._post(ENDPOINTS["claim"], {"session_id": session_id, "claim_seq": claim_seq, "slots_free": slots_free},
-                          credential, f"{session_id}:claim:{claim_seq}")
+        body: dict[str, Any] = {"session_id": session_id, "claim_seq": claim_seq, "slots_free": slots_free}
+        if job_end_reason is not None:
+            body["job_end_reason"] = job_end_reason
+        return self._post(ENDPOINTS["claim"], body, credential, f"{session_id}:claim:{claim_seq}")
 
     def heartbeat(self, leases: list[dict[str, Any]]) -> dict[str, Any]:
         """Not keyed: it only renews. A short budget, so a slow API never stalls the beat."""

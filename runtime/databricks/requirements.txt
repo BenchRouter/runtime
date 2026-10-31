@@ -1,5 +1,0 @@
-# The Databricks App only. The agent wheel has no dependencies. These are the versions the
-# Apps Python image already holds, so a deploy downloads nothing.
-Flask==3.0.3
-gunicorn==23.0.0
-PyYAML==6.0.3

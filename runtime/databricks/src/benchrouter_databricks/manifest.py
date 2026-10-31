@@ -47,6 +47,7 @@ from typing import Any
 MANIFEST_NAME = ".benchrouter/benchrouter.yml"
 API_FAMILY = "openai_chat_completions"
 MAX_TIMEOUT_MINUTES = 360
+LATENCY_LIMIT_FLOOR = 1.1  # EVAL-004: a route can loosen the latency gate, never tighten it
 METRIC_TYPES = ("boolean", "categorical", "numeric")
 
 
@@ -103,6 +104,8 @@ class EvalManifest:
     secrets: tuple[Secret, ...]
     timeout_minutes: int
     normalization: Normalization
+    latency_limit: float | str | None = None
+    isolation: str = "process"  # RUN-001: "process" shares a job; "job" takes one fresh job per item
 
 
 def _fail(detail: str) -> ManifestError:
@@ -255,7 +258,7 @@ BENCHROUTER_SCOPE_PREFIX = "benchrouter-"
 
 
 def is_benchrouter_scope(name: str) -> bool:
-    """A scope BenchRouter's app makes: it holds BenchRouter's credentials, never a customer secret.
+    """A scope the CLI creates: it holds BenchRouter's credentials, never a customer secret.
 
     Databricks scope names are case-insensitive.
     """
@@ -295,6 +298,17 @@ def parse_manifest(value: Any, route_key: str) -> EvalManifest:
     timeout = pack.get("timeout_minutes", 30)
     if isinstance(timeout, bool) or not isinstance(timeout, int) or not 0 < timeout <= MAX_TIMEOUT_MINUTES:
         raise _fail(f"eval_pack.timeout_minutes must be an integer from 1 to {MAX_TIMEOUT_MINUTES}")
+    isolation = pack.get("isolation", "process")
+    if isolation is None:
+        isolation = "process"
+    if isolation not in ("process", "job"):
+        raise _fail("eval_pack.isolation must be process or job")
+    latency_limit = pack.get("latency_limit")
+    if latency_limit is False:
+        latency_limit = "off"  # YAML 1.1 reads an unquoted `off` as false
+    if latency_limit is not None and latency_limit != "off" and (
+            isinstance(latency_limit, bool) or not isinstance(latency_limit, (int, float)) or not latency_limit >= LATENCY_LIMIT_FLOOR):
+        raise _fail(f'eval_pack.latency_limit must be "off" or a number of at least {LATENCY_LIMIT_FLOOR}')
     call_site = entry.get("call_site") or {}
     if not isinstance(call_site, dict):
         raise _fail("call_site must be a mapping")
@@ -350,4 +364,5 @@ def parse_manifest(value: Any, route_key: str) -> EvalManifest:
         predict_file=predict_file, predict_function=predict_function, scorers_file=scorers_file, scorers_attribute=scorers_attribute,
         code_files=code_files, scorer_files=scorer_files, requirements_lock=lock, base_url_env=base_url_env,
         secrets=tuple(secrets), timeout_minutes=timeout, normalization=_normalization(block["normalization"], primary),
+        latency_limit=latency_limit, isolation=isolation,
     )

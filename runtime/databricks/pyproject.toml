@@ -1,6 +1,6 @@
 [project]
 name = "benchrouter-databricks"
-version = "0.3.0"
+version = "0.4.0"
 description = "BenchRouter agent job and eval runner for a Databricks workspace (AUTH-012, RUN-001)."
 requires-python = ">=3.11"
 # PyYAML reads the eval folder's .benchrouter/benchrouter.yml (safe_load only).
@@ -10,6 +10,11 @@ dependencies = ["PyYAML>=6.0"]
 agent = "benchrouter_databricks.agent:main"
 runner = "benchrouter_databricks.runner:main"
 results = "benchrouter_databricks.results:main"
+
+# The release script reads these into the signed manifest, and the server refuses a hello that advertises a
+# feature the manifest does not list (RUN-001, repo work queue §10).
+[tool.benchrouter]
+features = ["executable_queue"]
 
 [build-system]
 requires = ["uv_build==0.12.5"]

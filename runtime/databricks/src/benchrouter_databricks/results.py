@@ -1,15 +1,15 @@
 """The eval job's results task (plan section 4.5). `run_if: ALL_DONE`; no BenchRouter credential.
 
-It reads what the runner parent left in `<results volume>/<claim>/` and writes it into the
-customer's workspace, as the app SP:
+It reads what the runner parent left in `<results volume>/<claim>/<work_id>/` and writes it into the
+customer's workspace, as the agent SP:
 
 - the MLflow experiment (`/Shared/benchrouter/<binding>`): one run per work item with the
   metrics, the ledger metrics and the `benchrouter.*` tags, the per-case assessments as an
   artifact, and a copy of each case trace (`mlflow.log_trace`, request and response) with its
   assessments (`mlflow.log_feedback`, `mlflow.log_expectation`). A copy is a new trace with a
   new id, not the original span tree (plan A.6, P15).
-- the results table, append only: one row per candidate model of the set per job run, by
-  `MERGE ... WHEN NOT MATCHED THEN INSERT` on (`job_run_id`, `result_set_id`, `candidate_model`).
+- no table. The agent alone writes the results table, one MERGE per candidate model once the set
+  settles (handlers.results_update), so a run that serves many sets leaves no row of its own.
 
 A failed results task changes no eval, no decision and no route. It imports MLflow (the image's
 trusted set) and reads the child's local store as data only; it runs no customer code.
@@ -22,98 +22,27 @@ import os
 import shutil
 import sys
 import tempfile
-from datetime import datetime, timezone
 from typing import Any
 
 from .agent import parse_args
 from .artifact import RESULTS_VOLUME, volume_root
-from .transport import with_retries
-from .workspace import Workspace, quote_full_name
-
-KEY_COLUMNS = ("job_run_id", "result_set_id", "candidate_model")
-
 
 def log(message: str, **fields: Any) -> None:
     detail = " ".join(f"{name}={value}" for name, value in fields.items())
     print(f"benchrouter-results {message} {detail}".rstrip(), flush=True)
 
 
-def _parameter(name: str, value: Any, kind: str) -> dict[str, Any]:
-    """A typed statement parameter; a missing value is SQL NULL."""
-    entry: dict[str, Any] = {"name": name, "type": kind}
-    if value is not None:
-        entry["value"] = ("true" if value else "false") if isinstance(value, bool) else str(value)
-    return entry
-
-
-def table_rows(record: dict[str, Any], written_at: str) -> list[list[dict[str, Any]]]:
-    """Plan 4.5: the results table rows of one job run, as statement parameters."""
-    summary = record.get("summary")
-    if not isinstance(summary, dict) or not isinstance(summary.get("rows"), list):
-        return []
-    rows = []
-    for row in summary["rows"]:
-        own = row.get("candidate_model") == record.get("model")
-        metrics = json.dumps(record.get("metrics")) if own and isinstance(record.get("metrics"), dict) else None
-        rows.append([
-            _parameter("written_at", written_at, "TIMESTAMP"),
-            _parameter("job_run_id", record.get("job_run_id"), "BIGINT"),
-            _parameter("claim_id", record.get("claim_id"), "STRING"),
-            _parameter("route_key", summary.get("route_key"), "STRING"),
-            _parameter("route_id", summary.get("route_id"), "STRING"),
-            _parameter("result_set_id", summary.get("result_set_id"), "STRING"),
-            _parameter("set_state", summary.get("set_state"), "STRING"),
-            _parameter("artifact_digest", summary.get("artifact_digest"), "STRING"),
-            _parameter("acceptance_fingerprint", summary.get("acceptance_fingerprint"), "STRING"),
-            _parameter("candidate_model", row.get("candidate_model"), "STRING"),
-            _parameter("role", row.get("role"), "STRING"),
-            _parameter("measured", row.get("measured"), "BOOLEAN"),
-            _parameter("unmeasured_cause", row.get("unmeasured_cause"), "STRING"),
-            _parameter("cases", row.get("cases"), "BIGINT"),
-            _parameter("cases_passed", row.get("cases_passed"), "BIGINT"),
-            _parameter("pass_rate", row.get("pass_rate"), "DOUBLE"),
-            _parameter("primary_metric", row.get("primary_metric"), "STRING"),
-            _parameter("primary_score", row.get("primary_score"), "DOUBLE"),
-            _parameter("metrics", metrics, "STRING"),
-            _parameter("eval_cost_usd", row.get("eval_cost_usd"), "DECIMAL(18,6)"),
-            # The ledger does not keep per-route call counts per window yet (plan 4.4).
-            _parameter("eval_calls", None, "BIGINT"),
-            _parameter("latency_p50_ms", row.get("latency_p50_ms"), "DOUBLE"),
-            _parameter("latency_p95_ms", row.get("latency_p95_ms"), "DOUBLE"),
-            _parameter("on_frontier", row.get("on_frontier"), "BOOLEAN"),
-            _parameter("is_chosen", row.get("is_chosen"), "BOOLEAN"),
-            _parameter("chosen_model", summary.get("chosen_model"), "STRING"),
-            _parameter("decision", summary.get("decision"), "STRING"),
-            _parameter("decision_reason", summary.get("decision_reason"), "STRING"),
-            _parameter("serving_model", summary.get("serving_model"), "STRING"),
-            _parameter("route_runtime_cost_usd_30d", summary.get("route_runtime_cost_usd_30d"), "DECIMAL(18,6)"),
-            _parameter("route_runtime_calls_30d", None, "BIGINT"),
-            _parameter("benchrouter_url", summary.get("benchrouter_url"), "STRING"),
-        ])
-    return rows
-
-
-def merge_statement(table: str, parameters: list[dict[str, Any]]) -> str:
-    def value(entry: dict[str, Any]) -> str:
-        if entry["name"] == "metrics":
-            return "from_json(:metrics, 'MAP<STRING, DOUBLE>')"
-        return f"CAST(:{entry['name']} AS {entry['type']})"
-
-    columns = [entry["name"] for entry in parameters]
-    selected = ", ".join(f"{value(entry)} AS `{entry['name']}`" for entry in parameters)
-    on = " AND ".join(f"target.`{name}` = source.`{name}`" for name in KEY_COLUMNS)
-    names = ", ".join(f"`{name}`" for name in columns)
-    sources = ", ".join(f"source.`{name}`" for name in columns)
-    return (f"MERGE INTO {quote_full_name(table)} AS target USING (SELECT {selected}) AS source ON {on} "
-            f"WHEN NOT MATCHED THEN INSERT ({names}) VALUES ({sources})")
-
-
-def write_table(workspace: Workspace, warehouse_id: str, table: str, record: dict[str, Any]) -> int:
-    written_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-    rows = table_rows(record, written_at)
-    for parameters in rows:
-        with_retries(lambda: workspace.execute_sql(warehouse_id, merge_statement(table, parameters), parameters))
-    return len(rows)
+def read_run_record(catalog: str, schema: str, claim_id: str, work_id: str | None) -> dict[str, Any] | None:
+    """One item's `run.json`, read as data: `<results volume>/<claim>/<work_id>/run.json`. None when it is absent or unreadable."""
+    folder = os.path.join(volume_root(catalog, schema, RESULTS_VOLUME), claim_id)
+    if work_id:
+        folder = os.path.join(folder, work_id)
+    try:
+        with open(os.path.join(folder, "run.json"), encoding="utf-8") as handle:
+            record = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    return record if isinstance(record, dict) else None
 
 
 def copy_to_experiment(record: dict[str, Any], store: str, experiment_path: str, destination: str = "databricks") -> int:
@@ -135,11 +64,8 @@ def copy_to_experiment(record: dict[str, Any], store: str, experiment_path: str,
                 break
     mlflow.set_tracking_uri(destination)
     mlflow.set_experiment(experiment_path)
-    summary = record.get("summary") or {}
-    ledger = next((row for row in summary.get("rows") or [] if row.get("candidate_model") == record.get("model")), {})
     tags = {
-        "benchrouter.route": str(summary.get("route_key") or record.get("route_id")),
-        "benchrouter.route_id": str(summary.get("route_id") or ""),
+        "benchrouter.route": str(record.get("route_id")),
         "benchrouter.model": str(record.get("model")),
         "benchrouter.result_set": str(record.get("result_set_id")),
         "benchrouter.work_id": str(record.get("work_id")),
@@ -150,9 +76,6 @@ def copy_to_experiment(record: dict[str, Any], store: str, experiment_path: str,
     copied = 0
     with mlflow.start_run(run_name=f"{record.get('model')} {record.get('work_id')}", tags=tags):
         metrics = {f"{name}/mean": value for name, value in (record.get("metrics") or {}).items()}
-        for name in ("eval_cost_usd", "latency_p50_ms", "latency_p95_ms"):
-            if isinstance(ledger.get(name), (int, float)):
-                metrics[{"eval_cost_usd": "benchrouter.cost_usd"}.get(name, f"benchrouter.{name}")] = ledger[name]
         if metrics:
             mlflow.log_metrics(metrics)
         if record.get("traces") is not None:
@@ -187,23 +110,31 @@ def copy_to_experiment(record: dict[str, Any], store: str, experiment_path: str,
 
 
 def run(args: dict[str, str]) -> int:
+    """Logs every item of the claim into the customer's experiment. A failed item loses only its MLflow data."""
     folder = os.path.join(volume_root(args["catalog"], args["schema"], RESULTS_VOLUME), args["claim"])
     try:
-        with open(os.path.join(folder, "run.json"), encoding="utf-8") as handle:
-            record = json.load(handle)
+        names = sorted(name for name in os.listdir(folder) if os.path.isfile(os.path.join(folder, name, "run.json")))
     except FileNotFoundError:
+        names = []
+    if not names:
         log("nothing to write", claim=args["claim"])
         return 0
-    rows = write_table(Workspace.from_runtime(), args["warehouse_id"], args["results_table"], record)
-    log("table rows", rows=rows)
-    store = os.path.join(folder, "mlflow.db")
-    if os.path.exists(store) and record.get("mlflow_run_id"):
-        with tempfile.TemporaryDirectory(prefix="benchrouter-results-") as local:
-            # SQLite needs a local file system for its locks.
-            copy = os.path.join(local, "mlflow.db")
-            shutil.copyfile(store, copy)
-            copied = copy_to_experiment(record, copy, args["experiment_path"])
-        log("experiment", traces=copied)
+    for name in names:
+        item = os.path.join(folder, name)
+        try:
+            with open(os.path.join(item, "run.json"), encoding="utf-8") as handle:
+                record = json.load(handle)
+            store = os.path.join(item, "mlflow.db")
+            if not (os.path.exists(store) and record.get("mlflow_run_id")):
+                continue
+            with tempfile.TemporaryDirectory(prefix="benchrouter-results-") as local:
+                # SQLite needs a local file system for its locks.
+                copy = os.path.join(local, "mlflow.db")
+                shutil.copyfile(store, copy)
+                copied = copy_to_experiment(record, copy, args["experiment_path"])
+            log("experiment", work=name, traces=copied)
+        except Exception as error:  # noqa: BLE001 - one item's MLflow data never stops the others
+            log("experiment failed", work=name, error=type(error).__name__)
     return 0
 
 

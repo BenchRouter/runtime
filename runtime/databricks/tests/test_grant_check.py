@@ -1,4 +1,4 @@
-"""Plan 4.4: the agent checks the eval's grants as the app SP before `run-now`.
+"""Plan 4.4: the agent checks the eval's grants as the agent SP before `run-now`.
 
 A refresh launch checks what the refresh reads (the folder's manifest, its cases table, its
 secrets); a work launch checks what the work run reads (the frozen artifact's secrets), the same
@@ -18,7 +18,7 @@ import unittest
 from benchrouter_databricks.agent import BenchRouter, handle_item
 from benchrouter_databricks.handlers import Context
 from tests.recorded_workspace import GRANT_ANSWERS, RecordedServer
-from tests.test_app_manifest import MANIFEST, ROUTE, FOLDER
+from tests.eval_manifest import MANIFEST, ROUTE, FOLDER
 
 EXPORT = "GET /api/2.0/workspace/export"
 TABLE = "GET /api/2.1/unity-catalog/tables/main.support.triage_cases"
@@ -119,6 +119,26 @@ class AgentGrantCheck(unittest.TestCase):
         self.server.answers[FROZEN] = {"status": 200, "raw": MANIFEST}
         reports = self.run_launch(launch_item({"purpose": "work", "artifact_digest": DIGEST}))
         self.assertEqual(reports[0]["outcome"], "done")
+
+    def test_a_pool_launch_holds_only_the_failing_eval_and_still_runs_the_others(self) -> None:
+        # Repo work queue §10: every listed eval is checked; one failure holds that eval, and the run starts.
+        other = "e" * 64
+        self.server.answers[FROZEN] = {"status": 200, "raw": MANIFEST}
+        self.server.answers[FROZEN.replace(DIGEST, other)] = {"status": 200, "raw": MANIFEST}
+        self.server.answers[SCOPE_LIST] = [{"status": 200, "body": {"secrets": [{"key": "JUDGE_API_KEY"}, {"key": "LOOKUP_TOKEN"}]}}, GRANT_ANSWERS["scope_refused"]]
+        evals = [{"eval_id": "dbxe_ok", "artifact_digest": DIGEST, "route_key": ROUTE}, {"eval_id": "dbxe_held", "artifact_digest": other, "route_key": ROUTE}]
+        reports = self.run_launch(launch_item({"purpose": "work", "artifact_digest": DIGEST, "evals": evals}))
+        self.assertEqual(reports[0]["outcome"], "done")
+        self.assertEqual(reports[0]["result"], {"run_id": 7701, "checked_evals": ["dbxe_ok"],
+                                                "held_evals": [{"eval_id": "dbxe_held", "grants": [{"kind": "secret_scope_read", "scope": "acme-evals"}]}]})
+
+    def test_a_pool_launch_where_every_eval_fails_starts_nothing_and_reports_the_triggers_grants(self) -> None:
+        self.server.answers[FROZEN] = {"status": 200, "raw": MANIFEST}
+        self.server.answers[SCOPE_LIST] = GRANT_ANSWERS["scope_refused"]
+        evals = [{"eval_id": "dbxe_recorded", "artifact_digest": DIGEST, "route_key": ROUTE}]
+        reports = self.run_launch(launch_item({"purpose": "work", "artifact_digest": DIGEST, "evals": evals}))
+        self.assertEqual(reports[0]["outcome"], "grant_needed")
+        self.assertNotIn(("POST", "/api/2.2/jobs/run-now"), self.server.paths())
 
     def test_a_grant_check_item_reports_the_same_check_and_a_pass(self) -> None:
         # The claim-less re-check of a waiting eval: a setup item with object grant_check.
