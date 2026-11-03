@@ -234,7 +234,7 @@ class Runner:
     # 4. Work --------------------------------------------------------------------------------
 
     def work(self, hello: dict[str, Any], heartbeat: Heartbeat) -> int:
-        digests = hello.get("contract_digests") or []
+        digests = list(hello.get("contract_digests") or [])
         ready = self.client.ready(digests)
         if ready.get("outcome") != "live":
             log("ready ended", outcome=ready.get("outcome"), reason=ready.get("reason"))
@@ -254,6 +254,10 @@ class Runner:
             claim_seq += 1
             outcome = answer.get("outcome")
             if outcome == "run" and answer.get("items"):
+                # RUN-001: only the server's explicit admission extends the hello list.
+                for digest in answer.get("new_contract_digests") or []:
+                    if digest not in digests:
+                        digests.append(digest)
                 items = answer["items"]
                 if queue:
                     for item in items:

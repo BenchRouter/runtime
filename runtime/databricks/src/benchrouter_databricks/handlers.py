@@ -10,7 +10,9 @@ its lease ends and BenchRouter hands it out again (at most five times).
 
 from __future__ import annotations
 
+import hashlib
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, cast
 
@@ -469,13 +471,61 @@ def endpoint_config(endpoint: str, route_key: str, api_base: str, runtime_key: s
     }]}
 
 
-def provider_service_config(route_key: str, api_base: str, runtime_key: str) -> dict[str, Any]:
+def provider_service_config(targets: list[str], api_base: str, runtime_key: str) -> dict[str, Any]:
+    direct: dict[str, Any] = {"base_url": f"{api_base}/v1", "api_key": {"plaintext": runtime_key}}
     return {
         "provider_type": "EXTERNAL_MODEL_PROVIDER_TYPE_CUSTOM",
-        # Unity Gateway appends the route to `base_url` (B0, plan A.6).
-        "targets": [{"model": route_key, "native_api_types": [CHAT_API_TYPE], "endpoint_route": "chat/completions"}],
-        "custom": {"direct": {"base_url": f"{api_base}/v1", "api_key": {"plaintext": runtime_key}}},
+        "targets": [{"model": key, "native_api_types": [CHAT_API_TYPE], "endpoint_route": "chat/completions"} for key in targets],
+        "custom": {"direct": direct},
     }
+
+
+def target_keys(payload: dict[str, Any], field: str) -> list[str]:
+    targets = payload.get(field)
+    if not isinstance(targets, list) or not all(isinstance(key, str) and key for key in targets):
+        raise Failed("payload_invalid")
+    return targets
+
+
+def apply_provider_service(ctx: Context, payload: dict[str, Any]) -> Outcome:
+    """SERVE-001 / AUTH-012: replace the whole frozen list, then read it back. Never merge."""
+    targets = target_keys(payload, "targets")
+    if len(targets) > 1024 or len(set(targets)) != len(targets):
+        raise Failed("payload_invalid")
+    service = text(payload, "service_name")
+    group = text(payload, "group_name")
+    api_base = text(payload, "api_base")
+    runtime_key = optional_text(payload, "runtime_key")
+    if runtime_key is None:
+        raise Failed("runtime_key_missing")
+    managers = principals(payload, "manage_principals")
+    querier = optional_principal(payload, "query_principal")
+    try:
+        split_full_name(service)
+    except ValueError:
+        raise Failed("identifier_invalid") from None
+    ws = ctx.workspace
+    existing = permanent("service_get", lambda: ws.get_provider_service(service))
+    if existing is None:
+        config = provider_service_config(targets, api_base, runtime_key)
+        permanent("service_create", lambda: ws.create_provider_service(service, config, f"BenchRouter group {group}"))
+    else:
+        config = provider_service_config(targets, api_base, runtime_key)
+        provider_service_change("service_update", lambda: ws.update_provider_service(service, config))
+    changes: list[PrincipalGrant] = [{"principal": manager, "add": ["MANAGE"]} for manager in managers]
+    if querier is not None:
+        changes.append({"principal": querier, "add": ["EXECUTE"]})
+    if changes:
+        provider_service_change("service_grant", lambda: ws.grant_provider_service(service, changes))
+    readback = permanent("service_get", lambda: ws.get_provider_service(service))
+    config = readback.get("config") if isinstance(readback, dict) else None
+    read_targets = config.get("targets") if isinstance(config, dict) else None
+    if not isinstance(read_targets, list) or not all(isinstance(target, dict) and isinstance(target.get("model"), str) for target in read_targets):
+        raise Failed("provider_service_readback_invalid")
+    # Same UTF-8 JSON array as the server; preserve duplicates so a bad list cannot match.
+    keys = sorted(target["model"] for target in read_targets)
+    digest = hashlib.sha256(json.dumps(keys, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+    return Outcome({"object": "provider_service", "service_name": service, "targets_hash": digest})
 
 
 def provider_service_change(step: str, call: Callable[[], Any]) -> Any:
@@ -494,21 +544,16 @@ def provider_service_change(step: str, call: Callable[[], Any]) -> Any:
 
 
 def apply_exposure(ctx: Context, payload: dict[str, Any]) -> dict[str, Any]:
-    """Creates or updates both objects of an exposed route with the item's runtime key."""
+    """SERVE-001: creates the route endpoint and waits for readiness before admitting a target."""
     querier = optional_principal(payload, "query_principal")
     managers = principals(payload, "manage_principals")
     endpoint = text(payload, "endpoint_name")
-    service = text(payload, "provider_service")
     route_key = text(payload, "route_key")
     api_base = text(payload, "api_base")
     runtime_key = payload.get("runtime_key")
     if not isinstance(runtime_key, str) or not runtime_key:
         # BenchRouter attaches the key only while it is live.
         raise Failed("runtime_key_missing")
-    try:
-        split_full_name(service)
-    except ValueError:
-        raise Failed("identifier_invalid") from None
     ws = ctx.workspace
 
     config = endpoint_config(endpoint, route_key, api_base, runtime_key)
@@ -547,22 +592,16 @@ def apply_exposure(ctx: Context, payload: dict[str, Any]) -> dict[str, Any]:
         for manager in managers:
             permanent("endpoint_grant", lambda manager=manager: ws.grant_endpoint(endpoint_id, manager, "CAN_MANAGE"))
 
-    service_config = provider_service_config(route_key, api_base, runtime_key)
-    if permanent("service_get", lambda: ws.get_provider_service(service)) is None:
-        permanent("service_create", lambda: ws.create_provider_service(service, service_config))
-    else:
-        provider_service_change("service_update", lambda: ws.update_provider_service(service, service_config))
-
-    # B0 (plan A.6, P5): an admin can delete a provider service the agent SP owns only with
-    # an explicit MANAGE grant, and its owner cannot change. The `admins` group cannot take
-    # a grant (plan 4.6), so the payload names each principal; each setup and rotation
-    # grants again.
-    changes: list[PrincipalGrant] = [{"principal": manager, "add": ["MANAGE"]} for manager in managers]
-    if querier is not None:
-        changes.append({"principal": querier, "add": ["EXECUTE"]})
-    if changes:
-        provider_service_change("service_grant", lambda: ws.grant_provider_service(service, changes))
-    return {"object": endpoint, "endpoint_name": endpoint, "service_name": service}
+    # AUTH-012 / SERVE-001: READY on the endpoint GET is the recorded readiness contract.
+    deadline = time.monotonic() + 60
+    while True:
+        ready = permanent("endpoint_get", lambda: ws.get_endpoint(endpoint))
+        state = ready.get("state") if isinstance(ready, dict) else None
+        if isinstance(state, dict) and state.get("ready") == "READY" and state.get("config_update") == "NOT_UPDATING":
+            return {"object": "serving_endpoint", "endpoint_name": endpoint}
+        if time.monotonic() >= deadline:
+            raise Failed("endpoint_not_ready")
+        time.sleep(min(2, max(0, deadline - time.monotonic())))
 
 
 def setup_serving_endpoint(ctx: Context, payload: dict[str, Any]) -> Outcome:
@@ -576,6 +615,7 @@ SETUP_OBJECTS: dict[str, Callable[[Context, dict[str, Any]], Outcome]] = {
     "results_update": results_update,
     "eval_job": setup_eval_job,
     "serving_endpoint": setup_serving_endpoint,
+    "provider_service": apply_provider_service,
     # Plan 4.4: the claim-less re-check of an eval that waits for a grant (a setup item by object).
     "grant_check": grant_check,
 }
@@ -583,19 +623,38 @@ SETUP_OBJECTS: dict[str, Callable[[Context, dict[str, Any]], Outcome]] = {
 
 # retire and rotate_key ----------------------------------------------------------------
 
-def remove_exposure(ctx: Context, endpoint: str, service: str) -> None:
-    """Deletes both objects of an exposure. An object already gone counts as deleted."""
+def remove_exposure(ctx: Context, endpoint: str) -> None:
+    """SERVE-001: the endpoint alone belongs to a route."""
     permanent("endpoint_delete", lambda: ctx.workspace.delete_endpoint(endpoint))
-    permanent("service_delete", lambda: ctx.workspace.delete_provider_service(service))
+
+
+def retire_provider_service(ctx: Context, service: str, skip_refused: bool = False) -> None:
+    """A refused deletion fails a retire item (the server then lists the service in cleanup_pending with a
+    metastore-admin step). Disconnect skips it (`skip_refused`): the orphan is already listed there."""
+    try:
+        ctx.workspace.delete_provider_service(service)
+    except ApiError as error:
+        if skip_refused and error.status == 403 and error.code == "PERMISSION_DENIED":
+            return
+        if error.transient:
+            raise
+        raise Failed(fixed_code("service_delete", error)) from None
 
 
 def retire(ctx: Context, payload: dict[str, Any]) -> Outcome:
-    remove_exposure(ctx, text(payload, "endpoint_name"), text(payload, "provider_service"))
+    if payload.get("object") == "provider_service":
+        retire_provider_service(ctx, text(payload, "service_name"))
+    elif payload.get("object") == "legacy_provider_services":
+        for service in target_keys(payload, "services"):
+            # AUTH-012: the group is already live. A refused legacy deletion remains visible.
+            retire_provider_service(ctx, service)
+    else:
+        remove_exposure(ctx, text(payload, "endpoint_name"))
     return Outcome()
 
 
 def rotate_key(ctx: Context, payload: dict[str, Any]) -> Outcome:
-    """Writes the new key into both objects; BenchRouter revokes the old key after the report."""
+    """AUTH-012: rotates only the endpoint key. Its report revokes the old endpoint key."""
     apply_exposure(ctx, payload)
     return Outcome()
 
@@ -658,7 +717,15 @@ def disconnect(ctx: Context, payload: dict[str, Any]) -> Outcome:
     for exposure in exposures:
         if not isinstance(exposure, dict):
             raise Failed("payload_invalid")
-        remove_exposure(ctx, text(exposure, "endpoint_name"), text(exposure, "provider_service"))
+        remove_exposure(ctx, text(exposure, "endpoint_name"))
+    services = payload.get("provider_services") or []
+    if not isinstance(services, list) or not all(isinstance(service, str) and service for service in services):
+        raise Failed("payload_invalid")
+    known_orphans = set(target_keys(payload, "known_orphans")) if "known_orphans" in payload else set()
+    for service in dict.fromkeys(services):
+        # A refusal for a service the server never recorded as an orphan fails the item: Disconnect would
+        # otherwise close with that service undeleted and unlisted.
+        retire_provider_service(ctx, service, skip_refused=service in known_orphans)
     volumes = payload.get("volumes")
     if not isinstance(volumes, list) or not all(isinstance(name, str) and name for name in volumes):
         raise Failed("payload_invalid")

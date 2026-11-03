@@ -7,7 +7,7 @@ The job runs as the agent SP on a schedule, with `max_concurrent_runs: 1`. Each 
 2. writes the rotated key to `poll-key` before any report, but only while `poll-key` still holds
    what this run read, so an older run never writes over a newer key; then deletes the Connect
    keys it tried, which are spent or revoked;
-3. handles and reports each item, then polls again while `next_check_seconds` is 0.
+3. handles and reports each item, then polls again after work or while `next_check_seconds` is 0.
 
 Logs hold fixed words, item ids and kinds only: never a key or a payload.
 """
@@ -185,7 +185,7 @@ def run(args: dict[str, str]) -> int:
             return 0
         for item in items:
             handle_item(ctx, benchrouter, rotated, item)
-        if poll.get("next_check_seconds") != 0:
+        if not items and poll.get("next_check_seconds") != 0:
             follow_release(ctx, poll.get("agent_release"))
             return 0
     follow_release(ctx, poll.get("agent_release"))
