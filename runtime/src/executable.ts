@@ -27,7 +27,7 @@ import { sdkBaseUrlForApiFamily } from "../../src/shared/sdk-base-url";
 import { childEnv, installEnv, type ControlContext } from "./control";
 import { isJsonFiniteNumber, isJsonObject, isJsonString, parseJsonText, ProtocolError, type JsonObject, type JsonValue } from "./json";
 import type { ExecutableSpec, ManifestRoute } from "./manifest";
-import { killGroup, spawnGroup } from "./processes";
+import { ITEM_MARK_ENV, killGroup, spawnGroup } from "./processes";
 import type { ItemOutcome, UploadRow } from "./replay";
 import { ItemFault } from "./replay";
 import { hashDeclaredFiles, sameHashes } from "./snapshot";
@@ -46,6 +46,8 @@ export interface ExecutableEnvironment {
   /** AUTH-007: the evaluator secrets every route of the manifest declares; none reaches the install. */
   evaluatorSecretNames: readonly string[];
   signal: AbortSignal;
+  /** RUN-001 / EVAL-012: shared by the probe, install and evaluator children of this item. */
+  itemMark: string;
   /** RUN-001 (repo work queue §8.2): how long the clean after the job's previous item took; absent on its first item. */
   previousCleanMs?: number;
 }
@@ -67,7 +69,7 @@ const STDERR_DRAIN_MS = 2_000;
  * With `stderr`, the child's stderr is piped: every chunk goes on to this process's
  * stderr unchanged, so the job log stays the same, and a bounded copy is kept.
  */
-function runGroup(argv: string[], cwd: string, env: StringMap, deadlineAt: number, signal: AbortSignal, captureStdout = false, stderr: BoundedCapture | null = null): Promise<ProcessOutcome> {
+function runGroup(argv: string[], cwd: string, env: StringMap, deadlineAt: number, signal: AbortSignal, itemMark: string, captureStdout = false, stderr: BoundedCapture | null = null): Promise<ProcessOutcome> {
   return new Promise((resolve) => {
     const [command, ...args] = argv;
     // An abort that landed before the spawn (a fence during install or hashing) starts nothing.
@@ -77,7 +79,7 @@ function runGroup(argv: string[], cwd: string, env: StringMap, deadlineAt: numbe
     }
     let child: ChildProcess;
     try {
-      child = spawnGroup(command, args, { cwd, env, stdio: ["ignore", captureStdout ? "pipe" : "inherit", stderr === null ? "inherit" : "pipe"] });
+      child = spawnGroup(command, args, { cwd, env: { ...env, [ITEM_MARK_ENV]: itemMark }, stdio: ["ignore", captureStdout ? "pipe" : "inherit", stderr === null ? "inherit" : "pipe"] });
     } catch {
       resolve({ exitCode: null, signal: null, timedOut: false, startFailed: true, stdout: "" });
       return;
@@ -204,7 +206,7 @@ export async function runExecutableItem(env: ExecutableEnvironment): Promise<Ite
   const pinnedPath = `${path.dirname(runtimeBinary)}${path.delimiter}${stepPath}`;
   const launcherBinary = launcher === executable.runtime ? runtimeBinary : await findOnPath(launcher, pinnedPath);
   if (launcherBinary === null) throw new ItemFault("harness_failed", `${launcher} is not on PATH; set it up in the workflow's customer-setup block`);
-  const probe = await runGroup([runtimeBinary, "--version"], workDir, childEnv(control, { PATH: pinnedPath }), Math.min(workDeadlineAt, Date.now() + 30_000), signal, true);
+  const probe = await runGroup([runtimeBinary, "--version"], workDir, childEnv(control, { PATH: pinnedPath }), Math.min(workDeadlineAt, Date.now() + 30_000), signal, env.itemMark, true);
   if (signal.aborted) throw abortFault(signal);
   const observed = probe.exitCode === 0 ? probe.stdout.trim() : "";
   const evaluatorRuntime: RunnerEvaluatorRuntime | null = isExactRuntimeVersion(observed) ? { name: executable.runtime, version: observed } : null;
@@ -218,7 +220,7 @@ export async function runExecutableItem(env: ExecutableEnvironment): Promise<Ite
   // EVAL-012: the install runs where the lockfile is, which is working_directory or a workspace root above it.
   const installDir = executable.lockfileDirectory === null ? treeRoot : path.join(treeRoot, executable.lockfileDirectory);
   const installStartedAt = Date.now();
-  const installRun = await runGroup(await installArgv(executable, pinnedPath), installDir, install, workDeadlineAt, signal);
+  const installRun = await runGroup(await installArgv(executable, pinnedPath), installDir, install, workDeadlineAt, signal, env.itemMark);
   const installMs = Date.now() - installStartedAt;
   // RUN-001 §3.3.1 (#577): an install that overruns the work deadline is a failed install, whichever
   // deadline timer fired first. The server never holds a failed install: a slow registry heals by itself.
@@ -279,7 +281,7 @@ async function runEvaluator(env: ExecutableEnvironment, stage: EvaluatorStage): 
   // The call token never shows in the job log, whatever the evaluator prints.
   console.log(`::add-mask::${item.call_token}`);
   const stderr = new BoundedCapture();
-  const run = await runGroup(evaluatorArgv, workDir, evaluatorEnv, timeoutAt, signal, false, stderr);
+  const run = await runGroup(evaluatorArgv, workDir, evaluatorEnv, timeoutAt, signal, env.itemMark, false, stderr);
   if (signal.aborted) throw abortFault(signal);
   if (run.timedOut && timeoutAt >= workDeadlineAt) throw new ItemFault("deadline_exceeded", "the evaluator ran past the work deadline");
   if (run.startFailed || run.timedOut || run.signal !== null || run.exitCode !== 0) {

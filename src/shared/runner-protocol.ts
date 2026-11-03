@@ -860,14 +860,14 @@ export interface RunnerClaimRequest {
   claim_seq: number;
   slots_free: number;
   /**
-   * RUN-001 (repo work queue §8.3): the runtime stops the job because an item left residue (a new
-   * process, a dirty tree, a lost lease or a `setup_failed` receipt). The claim leases nothing and
-   * closes the session `job_residue` with a wake row.
+   * RUN-001 / EVAL-012 (repo work queue §8.3): the runtime names the first job end: marked process
+   * residue, dirty tree, unreadable process list, lost lease or setup failure. The claim leases nothing and
+   * closes the session `job_<reason>` with a wake row. Detail stays local (DATA-001).
    */
   job_end_reason?: RunnerJobEndReason;
 }
 
-export const RUNNER_JOB_END_REASONS = ["residue"] as const;
+export const RUNNER_JOB_END_REASONS = ["residue", "dirty_tree", "process_list_unreadable", "lease_lost", "setup_failed"] as const;
 export type RunnerJobEndReason = (typeof RUNNER_JOB_END_REASONS)[number];
 
 /** §3.4: why a session exits without `complete`. */

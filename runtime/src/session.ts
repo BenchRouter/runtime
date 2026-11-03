@@ -16,6 +16,7 @@ import {
   RUNNER_REPLAY_SLOTS,
   type RunnerBlockedOutcome,
   type RunnerFailRequest,
+  type RunnerJobEndReason,
   type RunnerHelloSession,
   type RunnerRouteContract,
   type RunnerUploadRequest,
@@ -23,6 +24,7 @@ import {
   type RunnerWorkItem,
   type Sha256Digest
 } from "../../src/shared/runner-protocol";
+import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { loadReplayCases } from "./cases";
 import type { ControlContext } from "./control";
@@ -31,7 +33,7 @@ import { runExecutableItem } from "./executable";
 import { canonicalJson, errorMessage, objectOf, parseJsonText, ProtocolError, readString, sha256Digest, sleep, type JsonObject } from "./json";
 import { isJsonString } from "../../src/shared/json-parse-contracts";
 import { readManifest, type ManifestRoute } from "./manifest";
-import { killAllGroups, listProcesses, residuePids, systemOrphanPids, type ProcessTable } from "./processes";
+import { commandPath, itemResidue, killAllGroups, listProcesses, type ItemResidue, type ProcessTable } from "./processes";
 import { ItemFault, runReplayItem, type ItemOutcome } from "./replay";
 import { RunnerApiError, RunnerClient } from "./runner-client";
 import { hashDeclaredFiles, routeContract, sameHashes } from "./snapshot";
@@ -71,7 +73,7 @@ interface BatchState {
 
 /** What an item leaves for the job: a reason ends the job (§8.3), null lets it claim again. */
 interface ItemEnd {
-  endJob: string | null;
+  endJob: { reason: RunnerJobEndReason; detail: string } | null;
 }
 
 interface LeaseState {
@@ -358,7 +360,7 @@ async function claimLoop(
   const batching = control.features.includes("executable_queue");
   const batch: BatchState = {};
   let executableRunning = false;
-  let jobEnd: string | null = null;
+  const ending: ItemEnd = { endJob: null };
   let claimSeq = 0;
   let claimErrors = 0;
   let stop: string | null = null;
@@ -380,16 +382,16 @@ async function claimLoop(
         summary.outcome = stop;
         summary.note("the server offered no work within idle_exit_s; this worker exits by itself");
       }
-      if (stop === null && jobEnd !== null && running.size === 0) {
+      if (stop === null && ending.endJob !== null && running.size === 0) {
         // §8.3: the finished item's upload stands. The job claims nothing more and tells the server why.
-        summary.note(`this job ends: ${jobEnd}`);
+        summary.note(`this job ends: ${ending.endJob.detail}`);
         try {
-          await client.claim({ session_id: hello.session_id, claim_seq: claimSeq + 1, slots_free: 1, job_end_reason: "residue" });
+          await client.claim({ session_id: hello.session_id, claim_seq: claimSeq + 1, slots_free: 1, job_end_reason: ending.endJob.reason });
         } catch {
           // The session then ends by its own idle or liveness expiry; the job stops either way.
         }
         claimSeq += 1;
-        stop = `job ended: ${jobEnd}`;
+        stop = `job ended: ${ending.endJob.detail}`;
         continue;
       }
       const free = RUNNER_REPLAY_SLOTS - running.size;
@@ -424,7 +426,7 @@ async function claimLoop(
             }
             const key = leaseKey(item);
             const promise = runItemTurn(control, client, holds, heartbeat, prepared, item, summary, refusal, metrics, batch, executable && batching).then((end) => {
-              if (end.endJob !== null && jobEnd === null) jobEnd = end.endJob;
+              if (end.endJob !== null && ending.endJob === null) ending.endJob = end.endJob;
             }).finally(() => {
               if (executable) executableRunning = false;
               running.delete(key);
@@ -490,7 +492,8 @@ async function runItem(
   summary: JobSummary,
   refusal: ItemFault | null,
   metrics: ReplayMetricsWriter,
-  batch: BatchState
+  batch: BatchState,
+  itemMark: string
 ): Promise<ItemEnd> {
   let end: ItemEnd = { endJob: null };
   const lease = heartbeat.add(item);
@@ -499,7 +502,7 @@ async function runItem(
   let outcome: ItemOutcome;
   try {
     if (refusal !== null) throw refusal;
-    outcome = await executeItem(control, holds, heartbeat, lease, prepared, item, batch);
+    outcome = await executeItem(control, holds, heartbeat, lease, prepared, item, batch, itemMark);
   } catch (error) {
     const fault = error instanceof ItemFault ? error : new ItemFault("runtime_error", errorMessage(error instanceof Error ? error : String(error)));
     outcome = { kind: "fail", cause: fault.cause, diagnostics: { message: fault.message.slice(0, 500) }, providerOnly: false, metrics: fault.metrics };
@@ -511,7 +514,7 @@ async function runItem(
     const terminal = committed.terminal;
     // §8.3: a lost lease or a `setup_failed` receipt ends the job after this item.
     if (committed.endJob !== null) end = { endJob: committed.endJob };
-    else if (outcome.kind === "fail" && outcome.cause === "lease_lost") end = { endJob: "the lease was lost" };
+    else if (outcome.kind === "fail" && outcome.cause === "lease_lost") end = { endJob: { reason: "lease_lost", detail: "the lease was lost" } };
     if (outcome.metrics) {
       try {
         await metrics.write(item.work_id, item.retry_attempt, item.lease_gen, outcome.metrics, terminal);
@@ -534,9 +537,9 @@ async function runItem(
 /**
  * RUN-001 (repo work queue §8.2): one item and, for a batching executable item, what follows it. After
  * the evaluator's group is gone and the result is uploaded or failed, the tree is cleaned (untracked and
- * ignored files, `node_modules` included) and must be clean, and the same-UID process list must hold no
- * process that was not there before. Either fault ends the job. An item that already ended the job
- * skips both, because no further item runs here.
+ * ignored files, `node_modules` included) and must be clean. New same-UID candidates must carry
+ * this item's marker to count as residue; unreadable environments fail closed. Either fault ends the job.
+ * An item that already ended the job skips both, because no further item runs here.
  */
 async function runItemTurn(
   control: ControlContext,
@@ -551,15 +554,17 @@ async function runItemTurn(
   batch: BatchState,
   resets: boolean
 ): Promise<ItemEnd> {
+  const itemMark = randomBytes(16).toString("hex");
   return guardedItemTurn(
     resets,
-    () => runItem(control, client, holds, heartbeat, prepared, item, summary, refusal, metrics, batch),
+    () => runItem(control, client, holds, heartbeat, prepared, item, summary, refusal, metrics, batch, itemMark),
     async () => {
       const startedAt = Date.now();
       const clean = await cleanEvalTree(control, `${control.workspace}/.br-eval`);
       batch.previousCleanMs = Date.now() - startedAt;
       return clean;
-    }
+    },
+    itemMark
   );
 }
 
@@ -571,10 +576,11 @@ async function runItemTurn(
 export async function guardedItemTurn(
   resets: boolean,
   run: () => Promise<ItemEnd>,
-  cleanTree: () => Promise<{ ok: true } | { ok: false; detail: string }>
+  cleanTree: () => Promise<{ ok: true } | { ok: false; detail: string }>,
+  itemMark: string
 ): Promise<ItemEnd> {
   let before: ProcessTable | null = null;
-  let unreadable: string | null = null;
+  let unreadable = "the process list could not be read";
   if (resets) {
     try {
       before = await listProcesses();
@@ -584,26 +590,31 @@ export async function guardedItemTurn(
   }
   const end = await run();
   if (!resets || end.endJob !== null) return end;
-  if (before === null) return { endJob: unreadable };
+  if (before === null) return { endJob: { reason: "process_list_unreadable", detail: unreadable } };
   const clean = await cleanTree();
-  if (!clean.ok) return { endJob: `the tree is not clean after the item (${clean.detail.slice(0, 200)})` };
+  if (!clean.ok) return { endJob: { reason: "dirty_tree", detail: `the tree is not clean after the item (${clean.detail.slice(0, 200)})` } };
   await sleep(RESIDUE_SETTLE_MS);
   try {
     const uid = process.getuid?.() ?? -1;
-    const strays = async (): Promise<number[]> => {
+    const strays = async (): Promise<ItemResidue[]> => {
       const after = await listProcesses();
-      return residuePids(before, after, process.pid, uid, await systemOrphanPids(before, after, process.pid, uid));
+      return itemResidue(before, after, process.pid, uid, itemMark);
     };
     let stray = await strays();
     if (stray.length > 0) {
       // A short-lived process of someone else can be mid-exit in the first read. A daemon is still there a moment later.
       await sleep(RESIDUE_RECHECK_MS);
-      const later = new Set(await strays());
-      stray = stray.filter((pid) => later.has(pid));
+      const earlier = new Set(stray.map((row) => row.pid));
+      stray = (await strays()).filter((row) => earlier.has(row.pid));
     }
-    if (stray.length > 0) return { endJob: `${stray.length} new process(es) outlived the item (PID ${stray.slice(0, 5).join(", ")})` };
+    if (stray.length > 0) {
+      // RUN-001 / DATA-001: command paths stay in the local summary and log, never in a request.
+      const details = await Promise.all(stray.slice(0, 5).map(async (row) =>
+        `PID ${row.pid} (PPID ${row.ppid}, ${await commandPath(row.pid) ?? "unknown"}${row.envUnreadable ? ", env unreadable" : ""})`));
+      return { endJob: { reason: "residue", detail: `${stray.length} new process(es) outlived the item: ${details.join(", ")}` } };
+    }
   } catch (error) {
-    return { endJob: `the process list could not be read (${errorMessage(error instanceof Error ? error : String(error))})` };
+    return { endJob: { reason: "process_list_unreadable", detail: `the process list could not be read (${errorMessage(error instanceof Error ? error : String(error))})` } };
   }
   return { endJob: null };
 }
@@ -615,7 +626,8 @@ async function executeItem(
   lease: LeaseState,
   prepared: Map<Sha256Digest, PreparedRoute>,
   item: RunnerWorkItem,
-  batch: BatchState
+  batch: BatchState,
+  itemMark: string
 ): Promise<ItemOutcome> {
   const missing = item.requires.features.filter((feature) => !control.features.includes(feature));
   if (missing.length > 0) throw new ItemFault("capability_unsupported", `this runtime does not advertise ${missing.join(", ")}`);
@@ -636,7 +648,7 @@ async function executeItem(
   if (!sameHashes(await hashDeclaredFiles(treeRoot, entry.route), entry.fileHashes)) throw new ItemFault("tree_mutated", "a declared file changed after the snapshot");
   if (item.mode !== entry.route.mode) throw new ItemFault("mode_unsupported", `the item mode ${item.mode} does not match route ${entry.route.routeId}`);
   if (item.mode === "repository_executable") {
-    return runExecutableItem({ control, treeRoot, route: entry.route, item, fileHashes: entry.fileHashes, evaluatorSecretNames: entry.evaluatorSecretNames, signal: lease.controller.signal, previousCleanMs: batch.previousCleanMs });
+    return runExecutableItem({ control, treeRoot, route: entry.route, item, fileHashes: entry.fileHashes, evaluatorSecretNames: entry.evaluatorSecretNames, signal: lease.controller.signal, previousCleanMs: batch.previousCleanMs, itemMark });
   }
   const cases = await loadReplayCases(treeRoot, entry.route);
   return runReplayItem({
@@ -655,7 +667,7 @@ async function executeItem(
 interface Committed {
   terminal: MetricsTerminal;
   /** RUN-001 (repo work queue §8.3): why this item ends the job, if it does. */
-  endJob: string | null;
+  endJob: { reason: RunnerJobEndReason; detail: string } | null;
 }
 
 async function commit(control: ControlContext, client: RunnerClient, item: RunnerWorkItem, outcome: ItemOutcome, summary: JobSummary, fileHashes: Record<string, Sha256Digest>): Promise<Committed> {
@@ -724,7 +736,7 @@ async function commit(control: ControlContext, client: RunnerClient, item: Runne
     if (committed.receipt.failure_reason === "setup_failed") {
       const message = outcome.diagnostics.message;
       summary.setupFailed(item.work_id, outcome.cause, item.model_run.model, isJsonString(message) && message.length > 0 ? message : outcome.cause, outcome.evaluatorError);
-      return { terminal: "failed", endJob: "a setup_failed receipt" };
+      return { terminal: "failed", endJob: { reason: "setup_failed", detail: "a setup_failed receipt" } };
     }
     summary.failed(item.work_id, outcome.cause, failureClass(outcome.cause, outcome.providerOnly), item.model_run.model);
     if (outcome.evaluatorError) summary.evaluatorError(item.work_id, outcome.evaluatorError);
@@ -737,7 +749,7 @@ async function commit(control: ControlContext, client: RunnerClient, item: Runne
     }
     if (error instanceof RunnerApiError && error.code === "fenced") {
       summary.failed(item.work_id, "lease_lost", "infra", "the server fenced the lease before the result committed");
-      return { terminal: "unconfirmed", endJob: "the lease was lost" };
+      return { terminal: "unconfirmed", endJob: { reason: "lease_lost", detail: "the lease was lost" } };
     }
     summary.failed(item.work_id, outcome.kind === "upload" ? "upload_error" : "fail_error", "infra", errorMessage(error instanceof Error ? error : String(error)));
     return { terminal: "unconfirmed", endJob: null };
