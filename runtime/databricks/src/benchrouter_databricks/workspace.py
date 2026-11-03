@@ -170,10 +170,10 @@ class Workspace:
                 return None
             raise
 
-    def create_provider_service(self, full_name: str, config: dict[str, Any]) -> None:
+    def create_provider_service(self, full_name: str, config: dict[str, Any], comment: str) -> None:
         catalog, schema, name = split_full_name(full_name)
         self.call("POST", "/api/2.1/unity-catalog/model-provider-services",
-                  {"comment": "BenchRouter route", "config": config},
+                  {"comment": comment, "config": config},
                   query={"parent": f"schemas/{catalog}.{schema}", "model_provider_service_id": name})
 
     def update_provider_service(self, full_name: str, config: dict[str, Any]) -> None:

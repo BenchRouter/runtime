@@ -7,6 +7,7 @@ replaced. Each call is logged, so a test can prove which calls were (and were no
 from __future__ import annotations
 
 import json
+import ssl
 import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,7 +25,7 @@ class RecordedServer:
     taken in order, or to a function of the request body that picks one (a SQL statement's answer
     by its text); anything else is a 404."""
 
-    def __init__(self, answers: dict[str, Any]) -> None:
+    def __init__(self, answers: dict[str, Any], tls: ssl.SSLContext | None = None) -> None:
         self.answers = answers
         self.calls: list[tuple[str, str, dict[str, str], Any]] = []
         server = self
@@ -57,7 +58,10 @@ class RecordedServer:
                 pass
 
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.base = f"http://127.0.0.1:{self._server.server_address[1]}"
+        if tls is not None:
+            self._server.socket = tls.wrap_socket(self._server.socket, server_side=True)
+        scheme = "https" if tls is not None else "http"
+        self.base = f"{scheme}://127.0.0.1:{self._server.server_address[1]}"
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
 
     def workspace(self) -> Workspace:

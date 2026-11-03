@@ -37,7 +37,7 @@ QUERIER = {"type": "group", "name": "account users"}
 
 def default_answers():
     return copy.deepcopy({
-        f"GET {EP}": LIVE["frozen_endpoint"],
+        f"GET {EP}": [LIVE["frozen_endpoint"], LIVE["endpoint_created"]],
         f"PUT {EP}/config": LIVE["endpoint_frozen"],
         f"DELETE {EP}": LIVE["endpoint_deleted"],
         f"POST {CREATE}": LIVE["endpoint_created"],
@@ -52,7 +52,7 @@ def default_answers():
 
 def payload():
     return {
-        "object": "serving_endpoint", "endpoint_name": ENDPOINT, "provider_service": SERVICE,
+        "object": "serving_endpoint", "endpoint_name": ENDPOINT,
         "route_key": "takeover/route", "runtime_key": "test-runtime-key", "api_base": "https://api.example.com",
         "query_principal": copy.deepcopy(QUERIER), "manage_principals": copy.deepcopy(MANAGERS),
     }
@@ -79,9 +79,6 @@ def assert_acl(server, endpoint_id):
         (acl_path, [{"service_principal_name": SP, "permission_level": "CAN_MANAGE"}]),
         (acl_path, [{"group_name": "ops@example.com", "permission_level": "CAN_MANAGE"}]),
     ]
-    changes = next(body["changes"] for method, path, _, body in server.calls if path == PS_ACL)
-    assert changes == [*({"principal": p["name"], "add": ["MANAGE"]} for p in MANAGERS),
-                       {"principal": "account users", "add": ["EXECUTE"]}]
 
 
 INVALID_PRINCIPALS = ["admin@example.com", {"type": "unknown", "name": "admin"}, {"type": "user", "name": ""},
@@ -113,12 +110,19 @@ class TakeoverTest(unittest.TestCase):
                 updated = next(body for method, path, _, body in server.calls if method == "PUT")
                 assert created == {"name": ENDPOINT, "config": updated}
                 assert updated["served_entities"][0]["external_model"]["custom_provider_config"]["bearer_token_auth"] == {"token_plaintext": "test-runtime-key"}
-                service_config = next(body["config"] for method, path, _, body in server.calls if (method, path) == ("PATCH", PS))
-                assert service_config["custom"]["direct"]["api_key"] == {"plaintext": "test-runtime-key"}
+                assert all(path != PS for _, path in server.paths())
                 assert_acl(server, NEW_ENDPOINT_ID)
                 assert reports(server)[0]["outcome"] == "done"
                 if kind == "rotate_key":
                     assert reports(server)[0]["result"] == {}
+
+    def test_serve_001_endpoint_reports_only_after_a_ready_readback(self):
+        # Recorded 404 followed by the recorded ready endpoint. The bounded wait is two seconds.
+        self.server.answers[f"GET {EP}"] = [LIVE["frozen_endpoint"], NOT_FOUND, LIVE["endpoint_created"]]
+        deliver(self.server)
+        assert self.server.paths().count(("GET", EP)) == 3
+        assert reports(self.server)[0]["result"] == {"object": "serving_endpoint", "endpoint_name": ENDPOINT}
+        assert self.server.paths().index(("POST", REPORT)) > max(index for index, call in enumerate(self.server.paths()) if call == ("GET", EP))
 
     def test_auth_012_every_apply_grants_endpoint_managers(self):
         server = self.server
@@ -126,21 +130,12 @@ class TakeoverTest(unittest.TestCase):
             with self.subTest(case=case):
                 self.reset()
                 exists = case
-                server.answers[f"GET {EP}"] = LIVE["frozen_endpoint"] if exists else NOT_FOUND
+                server.answers[f"GET {EP}"] = [LIVE["frozen_endpoint"] if exists else NOT_FOUND, LIVE["endpoint_created"]]
                 server.answers[f"PUT {EP}/config"] = LIVE["endpoint_deleted"]
                 deliver(server)
                 assert ("DELETE", EP) not in server.paths()
                 assert_acl(server, OLD_ENDPOINT_ID if exists else NEW_ENDPOINT_ID)
                 assert reports(server)[0]["outcome"] == "done"
-
-    def test_auth_012_provider_create_also_grants_typed_principals(self):
-        server = self.server
-        server.answers[f"GET {PS}"] = NOT_FOUND
-        server.answers["POST /api/2.1/unity-catalog/model-provider-services"] = LIVE["provider_managed"]
-        deliver(server)
-        assert ("PATCH", PS) not in server.paths()
-        assert_acl(server, NEW_ENDPOINT_ID)
-        assert reports(server)[0]["outcome"] == "done"
 
     def test_auth_012_delete_still_settling_defers_until_next_delivery(self):
         server = self.server
@@ -149,34 +144,16 @@ class TakeoverTest(unittest.TestCase):
         assert server.paths() == [("GET", EP), ("PUT", f"{EP}/config"), ("DELETE", EP), ("POST", CREATE)]
         assert reports(server) == []
         # The next lease finds the endpoint gone. It creates once, without another config update.
-        server.answers[f"GET {EP}"] = NOT_FOUND
+        server.answers[f"GET {EP}"] = [NOT_FOUND, LIVE["endpoint_created"]]
         deliver(server)
         assert server.paths().count(("PUT", f"{EP}/config")) == 1
         assert server.paths().count(("POST", CREATE)) == 2
         assert reports(server)[0]["outcome"] == "done"
         assert_acl(server, NEW_ENDPOINT_ID)
 
-    def test_auth_012_data_001_unmanageable_provider_reports_only_fixed_code(self):
-        server = self.server
-        for case in product([(PS, "provider_update_refused"), (PS, "provider_update_admin_refused"),
-                             (PS_ACL, "provider_manage_refused"), (PS_ACL, "provider_manage_admin_refused")],
-                            ["setup", "rotate_key"]):
-            with self.subTest(case=case):
-                self.reset()
-                (step, answer), kind = case
-                server.answers[f"GET {PS}"] = LIVE["provider_orphan"]
-                server.answers[f"PATCH {step}"] = LIVE[answer]
-                deliver(server, kind=kind)
-                assert reports(server) == [{"item_id": "recorded-item", "lease_id": "recorded-lease", "outcome": "failed",
-                                            "result": {}, "error_code": "provider_service_unmanageable"}]
-                assert ("DELETE", PS) not in server.paths()
-                assert server.paths().count(("PATCH", step)) == 1
-                assert ("PATCH", f"/api/2.0/permissions/serving-endpoints/{NEW_ENDPOINT_ID}") in server.paths()
-
     def test_auth_012_takeover_requires_permission_denied_before_message_classification(self):
         # Negative contract variants retain the recorded message but change the HTTP classification.
-        cases = [("PUT", f"{EP}/config", "endpoint_frozen"),
-                 ("PATCH", PS, "provider_update_refused"), ("PATCH", PS_ACL, "provider_manage_refused")]
+        cases = [("PUT", f"{EP}/config", "endpoint_frozen")]
         for target, (status, code) in product(cases, [(400, "PERMISSION_DENIED"), (403, "BAD_REQUEST"),
                                                     (429, "PERMISSION_DENIED"), (500, "PERMISSION_DENIED")]):
             with self.subTest(target=target, status=status, code=code):
@@ -204,8 +181,6 @@ class TakeoverTest(unittest.TestCase):
         for case in [
             ("PUT", f"{EP}/config", "endpoint_manage_refused", "endpoint_update_http_403"),
             ("DELETE", EP, "endpoint_delete_refused", "endpoint_delete_http_403"),
-            ("PATCH", PS, "provider_use_refused", "service_update_http_403"),
-            ("PATCH", PS_ACL, "provider_use_refused", "service_grant_http_403"),
         ]:
             with self.subTest(case=case):
                 self.reset()
@@ -237,8 +212,6 @@ class TakeoverTest(unittest.TestCase):
                 if method == "PATCH" and "/permissions/serving-endpoints/" in path]
         assert len(acls) == len(MANAGERS)
         assert all(acl[0]["permission_level"] == "CAN_MANAGE" for acl in acls)
-        changes = next(body["changes"] for _, path, _, body in self.server.calls if path == PS_ACL)
-        assert changes == [{"principal": manager["name"], "add": ["MANAGE"]} for manager in MANAGERS]
         assert reports(self.server)[0]["outcome"] == "done"
 
     def test_auth_012_invalid_reader_or_owner_fails_before_writes(self):
@@ -262,7 +235,7 @@ class TakeoverTest(unittest.TestCase):
                 self.reset()
                 body = {"table": "workspace.br_design.results", "results_table": "workspace.br_design.results",
                         "warehouse_id": "recorded", "columns": [{"name": "written_at", "type": "TIMESTAMP"}],
-                        "exposures": [{"endpoint_name": ENDPOINT, "provider_service": SERVICE}], "volumes": []}
+                        "exposures": [{"endpoint_name": ENDPOINT}], "provider_services": [SERVICE], "volumes": []}
                 if invalid != "missing":
                     body["agent_principal"] = invalid
                 with self.assertRaises(Failed) as refused:

@@ -105,6 +105,47 @@ class QueueSessionTest(unittest.TestCase):
         finally:
             server.close()
 
+    def test_a_claim_extends_hello_digests_before_the_item_check(self):
+        admitted = {**item("w-new", "b"), "mode": "repository_executable", "contract_digest": "sha256:b",
+                    "requires": {"features": ["case_subset"]}}
+        answer = claim_run(admitted)
+        answer["body"]["new_contract_digests"] = ["sha256:b"]
+        server = RecordedServer({"POST /v1/runner/ready": LIVE, "POST /v1/runner/claim": answer,
+                                 "POST /v1/runner/fail": COMMITTED})
+        try:
+            hello = {"contract_digests": ["sha256:a"], "idle_exit_s": 60}
+            self.assertEqual(self.serve(server, hello), 0)
+            # Execution passes admission and reaches the existing unsupported-feature check.
+            failed = next(body for _, path, _, body in server.calls if path == "/v1/runner/fail")
+            self.assertEqual(failed["diagnostics"], {"message": "feature_unsupported"})
+            self.assertEqual(hello["contract_digests"], ["sha256:a"])
+            ready = next(body for _, path, _, body in server.calls if path == "/v1/runner/ready")
+            self.assertEqual(ready["contract_digests"], ["sha256:a"])
+        finally:
+            server.close()
+
+    @unittest.skipUnless(os.path.isdir("/proc"), "the residue check reads Linux /proc")
+    def test_an_unknown_digest_fails_alone_and_the_next_admitted_item_executes(self):
+        unknown = {**item("w-unknown", "a"), "mode": "repository_executable", "contract_digest": "sha256:unknown"}
+        admitted = {**item("w-admitted", "b"), "mode": "repository_executable", "contract_digest": "sha256:b",
+                    "requires": {"features": ["case_subset"]}}
+        answer = claim_run(unknown, admitted)
+        answer["body"]["new_contract_digests"] = ["sha256:b"]
+        # A later answer omits the field: an explicit admission lasts for the session.
+        later = claim_run({**admitted, "work_id": "w-later"})
+        server = RecordedServer({"POST /v1/runner/ready": LIVE,
+                                 "POST /v1/runner/claim": [answer, later, EXIT_IDLE],
+                                 "POST /v1/runner/fail": COMMITTED})
+        try:
+            self.assertEqual(self.serve(server, {"queue": True, "contract_digests": ["sha256:a"], "idle_exit_s": 60}), 0)
+            failed = [body for _, path, _, body in server.calls if path == "/v1/runner/fail"]
+            self.assertEqual([(body["work_id"], body["diagnostics"]["message"]) for body in failed],
+                             [("w-unknown", "contract_not_admitted"), ("w-admitted", "feature_unsupported"),
+                              ("w-later", "feature_unsupported")])
+            self.assertEqual([path for _, path, _, _ in server.calls].count("/v1/runner/claim"), 3)
+        finally:
+            server.close()
+
 
 if __name__ == "__main__":
     unittest.main()

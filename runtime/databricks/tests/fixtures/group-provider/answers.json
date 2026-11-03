@@ -1,0 +1,111 @@
+{
+  "created": {
+    "status": 200,
+    "body": {
+      "name": "model-provider-services/workspace.br_probe_pschema.br_probe_multi",
+      "effective_owner": "recorded-principal",
+      "id": "8d535a84-d8f0-4e10-b15b-59b44c794b97",
+      "securable_type": "MODEL_PROVIDER_SERVICE",
+      "metastore_id": "557a21b8-6390-4e56-98d7-9a0c20b84c32",
+      "create_time": "2026-11-02T19:14:44.473Z",
+      "created_by": "recorded-principal",
+      "update_time": "2026-11-02T19:14:44.473Z",
+      "updated_by": "recorded-principal",
+      "etag": "CAESCAAAAaGdr3Z5",
+      "config": {
+        "provider_type": "EXTERNAL_MODEL_PROVIDER_TYPE_CUSTOM",
+        "custom": {
+          "direct": {
+            "base_url": "https://api.benchrouter.com/v1",
+            "api_key": {}
+          }
+        },
+        "targets": [
+          {
+            "model": "demo/route-a",
+            "native_api_types": [
+              "openai/v1/chat/completions"
+            ],
+            "endpoint_route": "chat/completions"
+          },
+          {
+            "model": "demo/route-b",
+            "native_api_types": [
+              "openai/v1/chat/completions"
+            ],
+            "endpoint_route": "chat/completions"
+          },
+          {
+            "model": "demo/route-c",
+            "native_api_types": [
+              "openai/v1/chat/completions"
+            ],
+            "endpoint_route": "chat/completions"
+          }
+        ]
+      }
+    }
+  },
+  "updated_without_key": {
+    "status": 200,
+    "body": {
+      "name": "model-provider-services/workspace.br_probe_pschema.br_probe_echo",
+      "effective_owner": "recorded-principal",
+      "id": "0cac0a1b-6163-4b9c-9e74-d5bc04b0fa63",
+      "securable_type": "MODEL_PROVIDER_SERVICE",
+      "metastore_id": "557a21b8-6390-4e56-98d7-9a0c20b84c32",
+      "create_time": "2026-11-02T19:15:08.324Z",
+      "created_by": "recorded-principal",
+      "update_time": "2026-11-02T19:15:36.152Z",
+      "updated_by": "recorded-principal",
+      "etag": "CAESCAAAAaGdsEBY",
+      "config": {
+        "provider_type": "EXTERNAL_MODEL_PROVIDER_TYPE_CUSTOM",
+        "custom": {
+          "direct": {
+            "base_url": "https://httpbin.org/anything",
+            "api_key": {}
+          }
+        },
+        "targets": [
+          {
+            "model": "demo/route-a",
+            "native_api_types": [
+              "openai/v1/chat/completions"
+            ],
+            "endpoint_route": "chat/completions"
+          },
+          {
+            "model": "demo/route-b",
+            "native_api_types": [
+              "openai/v1/chat/completions"
+            ],
+            "endpoint_route": "chat/completions"
+          },
+          {
+            "model": "demo/route-d",
+            "native_api_types": [
+              "openai/v1/chat/completions"
+            ],
+            "endpoint_route": "chat/completions"
+          }
+        ]
+      }
+    }
+  },
+  "grant": {
+    "status": 200,
+    "body": {
+      "privilege_assignments": [
+        {
+          "principal": "account users",
+          "privileges": [
+            "EXECUTE"
+          ],
+          "principal_id": 84465949952836
+        }
+      ]
+    }
+  },
+  "_source": "Live multi-target probe, 2026-11-02. create.out, list-probe.json (echo service after keyless PATCH), grant.txt. Principal metadata scrubbed. Config and target shape preserved."
+}
