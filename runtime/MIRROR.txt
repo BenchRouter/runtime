@@ -13,3 +13,5 @@ src/shared/json-schema-check.ts
 src/shared/model-output.ts
 src/shared/replay-body.ts
 src/shared/case-planning.ts
+src/proxy/stream/sse.ts
+src/proxy/constants.ts
