@@ -47,7 +47,8 @@ export interface ManifestRoute {
   judgeModel: string | null;
   /** `eval_pack.config_path`: the committed manifest file, hashed as part of the contract. */
   configPath: string;
-  scorerPath: string;
+  /** Null for a repository_executable route that declares no scorer (EVAL-012). */
+  scorerPath: string | null;
   resultSchema: string;
   caseRefs: string[];
   caseRepeats: ReplayCaseRepeatPolicy | null;
@@ -200,7 +201,8 @@ function parseRoute(value: JsonValue, index: number): ManifestRoute {
     isolation,
     judgeModel,
     configPath: repoPath(pack.config_path, `${prefix}.eval_pack.config_path`),
-    scorerPath: repoPath(pack.scorer, `${prefix}.eval_pack.scorer`),
+    // EVAL-012: only an isolated_replay route needs a scorer. A repository_executable manifest may omit it.
+    scorerPath: executable && (pack.scorer === undefined || pack.scorer === null) ? null : repoPath(pack.scorer, `${prefix}.eval_pack.scorer`),
     resultSchema: requiredString(pack.result_schema, `${prefix}.eval_pack.result_schema`),
     caseRefs,
     caseRepeats: repeats.policy,
@@ -242,8 +244,14 @@ export async function readManifest(treeRoot: string): Promise<Manifest> {
  * scorer, every case_ref and code_ref, and for executable routes the lockfile, input_refs
  * and acceptance_refs.
  */
+/** The scorer an isolated_replay route always declares. */
+export function replayScorerPath(route: ManifestRoute): string {
+  if (route.scorerPath === null) throw new ProtocolError(`${route.routeId} declares no scorer`);
+  return route.scorerPath;
+}
+
 export function declaredFiles(route: ManifestRoute): string[] {
-  const files = new Set<string>([route.configPath, route.scorerPath, ...route.caseRefs, ...route.codeRefs]);
+  const files = new Set<string>([route.configPath, ...(route.scorerPath === null ? [] : [route.scorerPath]), ...route.caseRefs, ...route.codeRefs]);
   if (route.executable) {
     for (const ref of [route.executable.lockfilePath, ...route.executable.inputRefs, ...route.executable.acceptanceRefs]) files.add(ref);
   }
