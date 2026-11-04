@@ -581,6 +581,11 @@ export interface RunnerHelloRequest {
   workflow_paths: string[];
   /** sha256 of each kit file at `workflow_sha`, keyed by repo path. */
   kit_file_hashes: Record<string, Sha256Digest>;
+  /**
+   * SETUP-001: the `BENCHROUTER_KIT_VERSION` the committed workflow's runtime step declares at
+   * `workflow_sha` (`MAJOR.MINOR.PATCH`). Absent or null for a kit without the marker.
+   */
+  kit_version?: string | null;
 }
 
 /**
@@ -887,7 +892,12 @@ export type RunnerResultSetTerminalState = (typeof RUNNER_RESULT_SET_TERMINAL_ST
  * execution release.
  */
 export type RunnerClaimResponse =
-  | { outcome: "run"; items: RunnerWorkItem[] }
+  | {
+    outcome: "run";
+    items: RunnerWorkItem[];
+    /** RUN-001: Databricks pool admissions, repeated safely on later claims. */
+    new_contract_digests?: Sha256Digest[];
+  }
   | { outcome: "wait_until"; until: RunnerTimestamp }
   | { outcome: "draining" }
   | { outcome: "exit"; reason: RunnerExitReason }

@@ -17,6 +17,7 @@ import {
   type RunnerBlockedOutcome,
   type RunnerFailRequest,
   type RunnerJobEndReason,
+  type RunnerHelloRequest,
   type RunnerHelloSession,
   type RunnerRouteContract,
   type RunnerUploadRequest,
@@ -234,7 +235,7 @@ export async function runWorker(control: ControlContext): Promise<number> {
     // that declares `services` keeps one executable item per job, so it leaves the feature out.
     if (kit.declaresServices) control.features = control.features.filter((feature) => feature !== "executable_queue");
     const oidcToken = await requestOidcToken(control.oidc.url, control.oidc.token, `benchrouter:repo:${control.repository}:hello`, holds);
-    const hello = await client.hello(oidcToken, {
+    const helloRequest: RunnerHelloRequest = {
       protocol: RUNNER_PROTOCOL_MAJOR,
       claim: await dispatchClaim(),
       bootstrap_version: control.bootstrapVersion,
@@ -243,7 +244,10 @@ export async function runWorker(control: ControlContext): Promise<number> {
       workflow_authority: kit.authority,
       workflow_paths: kit.workflowPaths,
       kit_file_hashes: kit.kitFileHashes
-    });
+    };
+    // SETUP-001: an unmarked kit sends no field, so this runtime also says hello to a server without it.
+    if (kit.kitVersion !== null) helloRequest.kit_version = kit.kitVersion;
+    const hello = await client.hello(oidcToken, helloRequest);
     if (hello.outcome === "done") {
       summary.outcome = `done: ${hello.reason}`;
       summary.note(`nothing to do (${hello.reason})`);
