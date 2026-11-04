@@ -25,7 +25,7 @@ import type { ReplayCase } from "./cases";
 import { replayRequestBody } from "../../src/shared/replay-body";
 import type { ControlContext } from "./control";
 import { canonicalJson, finiteOrNull, isJsonObject, isJsonString, safeCode, stringOrEmpty, type JsonObject, type JsonValue } from "./json";
-import type { ManifestRoute } from "./manifest";
+import { replayScorerPath, type ManifestRoute } from "./manifest";
 import {
   completionFinishReason,
   extractAssistantMessage,
@@ -171,7 +171,7 @@ export async function runReplayItem(env: ItemEnvironment): Promise<ItemOutcome> 
   env.signal.addEventListener("abort", stopScorers, { once: true });
   try {
     for (let slot = 0; slot < concurrency; slot += 1) {
-      const scorer = new ScorerProcess(env.control, env.treeRoot, route.scorerPath);
+      const scorer = new ScorerProcess(env.control, env.treeRoot, replayScorerPath(route));
       const started = await scorer.start();
       if (!started.ok) throw new ItemFault("harness_failed", `the scorer failed to load (${started.errorCode})`);
       scorers.push(scorer);

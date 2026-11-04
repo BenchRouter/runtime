@@ -8,7 +8,7 @@ import path from "node:path";
 import { loadReplayCases } from "./cases";
 import type { ControlContext } from "./control";
 import { errorMessage, isJsonObject, isJsonString, parseJsonText, ProtocolError, type JsonObject, type JsonValue } from "./json";
-import { isRepoPath, readManifest, type ManifestRoute } from "./manifest";
+import { isRepoPath, readManifest, replayScorerPath, type ManifestRoute } from "./manifest";
 import { messageContent, parseMessage } from "./model-output";
 import { computeCardinalPaths, generateMutations, isContainer, type Mutation } from "./mutation-cert";
 import { ScorerProcess, type JudgeBridge } from "./scorer-process";
@@ -403,9 +403,9 @@ function printFixtureResults(title: string, results: FixtureResult[]): void {
 // ---------------------------------------------------------------------------
 
 async function calibrateStructured(control: ControlContext, route: ManifestRoute, cases: JsonObject[], explicitFixtures: JsonObject[]): Promise<boolean> {
-  const report = await runMutationCert(control, cases, route.scorerPath);
+  const report = await runMutationCert(control, cases, replayScorerPath(route));
   console.log(formatReport(report));
-  const fixtureResults = await runFixtureChecks(control, route.scorerPath, explicitFixtures, []);
+  const fixtureResults = await runFixtureChecks(control, replayScorerPath(route), explicitFixtures, []);
   printFixtureResults("Explicit calibration fixtures", fixtureResults);
   const ok = report.certified && fixtureResults.every((result) => result.ok);
   console.log(`Result: LOCAL SCORER CALIBRATION ${ok ? "PASSED" : "FAILED"}`);
@@ -416,7 +416,7 @@ async function calibrateStructured(control: ControlContext, route: ManifestRoute
 }
 
 async function calibrateHumanRead(control: ControlContext, route: ManifestRoute, cases: JsonObject[], calibration: CalibrationFile): Promise<boolean> {
-  const fixtureResults = await runFixtureChecks(control, route.scorerPath, calibration.fixtures, casesToReferenceFixtures(cases));
+  const fixtureResults = await runFixtureChecks(control, replayScorerPath(route), calibration.fixtures, casesToReferenceFixtures(cases));
   printFixtureResults("Human-read fixture calibration", fixtureResults);
   const passCount = fixtureResults.filter((result) => result.expect === "pass").length;
   const failCount = fixtureResults.filter((result) => result.expect === "fail").length;
@@ -426,7 +426,7 @@ async function calibrateHumanRead(control: ControlContext, route: ManifestRoute,
     ok = false;
   }
   if (cases.length > 0) {
-    const advisory = await runMutationCert(control, cases, route.scorerPath);
+    const advisory = await runMutationCert(control, cases, replayScorerPath(route));
     console.log("");
     console.log("Advisory deterministic mutations (not a human-read task-quality result):");
     console.log(formatReport(advisory));
@@ -491,7 +491,7 @@ async function calibrateRoute(control: ControlContext, route: ManifestRoute): Pr
   console.log(`== Route ${route.routeId} ==`);
   if (route.mode === "repository_executable") return calibrateRepositoryExecutable(control, route);
   // A missing scorer fails the command before any case is read, as before.
-  await readFile(path.join(control.controlRoot, route.scorerPath));
+  await readFile(path.join(control.controlRoot, replayScorerPath(route)));
   // §6.1: every case_ref, with the same route filter and case identity as CI replay.
   const cases = (await loadReplayCases(control.controlRoot, route)).map((testCase) => testCase.raw);
   const calibration = await readCalibrationFile(control.controlRoot, calibrationPath(route));
