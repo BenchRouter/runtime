@@ -10,6 +10,7 @@ import type { ControlContext } from "./control";
 import { canonicalJson, errorMessage, isJsonFiniteNumber, isJsonObject, isJsonString, sha256Hex, type JsonObject, type JsonValue } from "./json";
 import { readManifest } from "./manifest";
 import { parseJsonValueFromString } from "../../src/shared/json-parse-contracts";
+import { createStreamAssembler, type AssembledStream } from "./stream-capture";
 import type { StringMap } from "./transport";
 
 export const REDACTED = "[[benchrouter:redacted]]";
@@ -173,9 +174,17 @@ function extractCost(response: JsonValue | null): number | null {
  * A request that embeds a prior model or tool output is `dependent`: replay treats it
  * as an isolated compatibility check, never end to end.
  */
+/** Responses input items that carry an earlier model output or tool result. */
+const RESPONSES_PRIOR_OUTPUT_TYPES = new Set(["function_call", "function_call_output", "reasoning"]);
+
 function detectDependent(input: JsonValue): boolean {
-  const messages = isJsonObject(input) && Array.isArray(input.messages) ? input.messages : [];
-  return messages.some((message) => isJsonObject(message) && (message.role === "assistant" || message.role === "tool"));
+  if (!isJsonObject(input)) return false;
+  // Chat and Messages: an assistant turn or a tool result in the history.
+  const messages = Array.isArray(input.messages) ? input.messages : [];
+  if (messages.some((message) => isJsonObject(message) && (message.role === "assistant" || message.role === "tool"))) return true;
+  // Responses: a continuation carries function calls, their outputs or assistant items in `input`.
+  const items = Array.isArray(input.input) ? input.input : [];
+  return items.some((item) => isJsonObject(item) && (item.role === "assistant" || (isJsonString(item.type) && RESPONSES_PRIOR_OUTPUT_TYPES.has(item.type))));
 }
 
 function readBody(request: IncomingMessage): Promise<Buffer> {
@@ -342,7 +351,7 @@ interface CaptureEntry {
   costUsd: number | null;
 }
 
-async function forwardOnce(settings: CaptureSettings, target: string, method: string, body: Buffer, admitted: StringMap): Promise<ForwardReply> {
+function upstreamHeaders(settings: CaptureSettings, admitted: StringMap): StringMap {
   const headers: StringMap = {
     authorization: settings.authorization,
     "content-type": "application/json",
@@ -355,8 +364,181 @@ async function forwardOnce(settings: CaptureSettings, target: string, method: st
     const value = admitted[name];
     if (value !== undefined && value.length > 0) headers[name] = value;
   }
-  const upstream = await fetch(target, { method, headers, body: body.length > 0 ? body : undefined });
+  return headers;
+}
+
+function fetchUpstream(settings: CaptureSettings, call: CallContext, signal?: AbortSignal): Promise<Response> {
+  return fetch(call.target, { method: call.method, headers: upstreamHeaders(settings, call.admitted), body: call.body.length > 0 ? call.body : undefined, signal });
+}
+
+async function forwardOnce(settings: CaptureSettings, call: CallContext): Promise<ForwardReply> {
+  const upstream = await fetchUpstream(settings, call);
   return { status: upstream.status, ok: upstream.ok, headers: upstream.headers, text: await upstream.text() };
+}
+
+function relayHeaders(headers: Headers): StringMap {
+  const relay: StringMap = {};
+  headers.forEach((value, key) => {
+    if (!UNRELAYED_HEADERS.has(key.toLowerCase())) relay[key] = value;
+  });
+  return relay;
+}
+
+/** One app call: what the sidecar forwards and how its case is keyed. */
+interface CallContext {
+  requestJson: JsonObject | null;
+  route: string;
+  endpoint: string;
+  target: string;
+  method: string;
+  body: Buffer;
+  admitted: StringMap;
+}
+
+/** Record the call's samples as one case when the first relayed reply succeeded. */
+async function recordSamples(settings: CaptureSettings, store: CaptureStore, call: CallContext, samples: Sample[], selectedModel: string | null): Promise<void> {
+  const firstSample = samples[0];
+  if (call.requestJson === null || !firstSample?.ok) return;
+  const redactions: Redaction[] = [];
+  const input = redact(normalizeInput(call.requestJson), "", settings.redactPaths, redactions);
+  // Redact each message OBJECT (structure-preserving), then store it as JSON text.
+  const outputs = samples.map((sample) => JSON.stringify(redact(sample.message, "reference_output", settings.redactPaths, redactions)));
+  await store.record({
+    route: call.route,
+    input: isJsonObject(input) ? input : {},
+    outputs,
+    selectedModel,
+    redactions,
+    dependent: detectDependent(input),
+    endpoint: call.endpoint,
+    routing: routingContext(call.requestJson),
+    headers: call.admitted,
+    costUsd: extractCost(firstSample.json)
+  });
+}
+
+/**
+ * A streamed call that is not a case. The reason goes to stderr and to the raw log,
+ * so the install agent sees why the call is missing from the cases file.
+ */
+async function logNotRecorded(settings: CaptureSettings, call: CallContext, reason: string): Promise<void> {
+  console.error(`BenchRouter capture sidecar: streamed call not recorded (${reason})`);
+  try {
+    await appendFile(settings.rawLogPath, `${JSON.stringify({ route: call.route, endpoint: call.endpoint, captured_at: new Date().toISOString(), not_recorded: reason })}\n`);
+  } catch (error) {
+    console.error("BenchRouter capture sidecar: failed to append raw log", errorMessage(error instanceof Error ? error : String(error)));
+  }
+}
+
+function streamSample(assembled: { response: JsonObject }): Sample {
+  return { json: assembled.response, message: extractMessage(assembled.response), ok: true };
+}
+
+/** Resolves true once the app has the whole response, false when it left first. */
+function delivered(response: ServerResponse): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (response.writableFinished) resolve(true);
+    else if (response.destroyed) resolve(false);
+    else {
+      response.once("finish", () => resolve(true));
+      response.once("close", () => resolve(response.writableFinished));
+    }
+  });
+}
+
+/** Wait until the app's socket takes more bytes, or is gone. */
+function writable(response: ServerResponse): Promise<void> {
+  return new Promise((resolve) => {
+    const done = (): void => {
+      response.off("drain", done);
+      response.off("close", done);
+      resolve();
+    };
+    response.once("drain", done);
+    response.once("close", done);
+  });
+}
+
+/**
+ * SERVE-009: a streamed call. The first upstream stream is relayed to the app chunk by
+ * chunk as it arrives, unchanged, so the app's tool loop runs exactly as in production.
+ * The same bytes feed the assembler, which rebuilds the body a non-streamed call would
+ * have returned. Extra samples are read whole and assembled the same way.
+ */
+async function relayStream(settings: CaptureSettings, store: CaptureStore, call: CallContext, response: ServerResponse): Promise<void> {
+  const abort = new AbortController();
+  // Settles once, in every phase: before the upstream headers, mid-stream, or on the last write.
+  const appDone = delivered(response);
+  // The app hung up: stop the upstream stream, as production does.
+  response.once("close", () => {
+    if (!response.writableFinished) abort.abort();
+  });
+  let upstream: Response;
+  try {
+    upstream = await fetchUpstream(settings, call, abort.signal);
+  } catch (error) {
+    console.error("BenchRouter capture sidecar:", errorMessage(error instanceof Error ? error : String(error)));
+    if (abort.signal.aborted) {
+      await logNotRecorded(settings, call, "client_disconnected");
+      return;
+    }
+    sendJson(response, 502, { error: { message: "BenchRouter capture sidecar upstream fetch failed" } });
+    await logNotRecorded(settings, call, "upstream_fetch_failed");
+    return;
+  }
+  response.writeHead(upstream.status, relayHeaders(upstream.headers));
+  response.flushHeaders();
+  const assembler = createStreamAssembler(call.endpoint);
+  const reader = upstream.body?.getReader();
+  try {
+    for (let read = await reader?.read(); read !== undefined && !read.done; read = await reader?.read()) {
+      if (abort.signal.aborted) break;
+      assembler.push(read.value);
+      if (!response.write(read.value)) await writable(response);
+    }
+  } catch (error) {
+    // The upstream stream broke (or the app left). The app gets the same broken stream
+    // it would get in production, and a partial stream is never a case.
+    response.destroy();
+    console.error("BenchRouter capture sidecar:", errorMessage(error instanceof Error ? error : String(error)));
+    await logNotRecorded(settings, call, abort.signal.aborted ? "client_disconnected" : "upstream_stream_dropped");
+    return;
+  }
+  if (!response.destroyed) response.end();
+  // A stream the app did not receive to its end is not what the app saw: no case.
+  if (!(await appDone)) {
+    await reader?.cancel().catch(() => undefined);
+    await logNotRecorded(settings, call, "client_disconnected");
+    return;
+  }
+  const contentType = upstream.headers.get("content-type") ?? "";
+  const assembled: AssembledStream = !upstream.ok
+    ? { ok: false, reason: `upstream_status_${upstream.status}` }
+    : !contentType.startsWith("text/event-stream")
+      ? { ok: false, reason: "stream_not_event_stream" }
+      : assembler.finish();
+  if (!assembled.ok) {
+    await logNotRecorded(settings, call, assembled.reason);
+    return;
+  }
+  const samples: Sample[] = [streamSample(assembled)];
+  let selectedModel = upstream.headers.get("x-benchrouter-selected-model");
+  try {
+    for (let index = 1; index < settings.samplesTarget; index += 1) {
+      const extra = await forwardOnce(settings, call);
+      selectedModel = extra.headers.get("x-benchrouter-selected-model") || selectedModel;
+      const extraAssembler = createStreamAssembler(call.endpoint);
+      extraAssembler.push(Buffer.from(extra.text, "utf8"));
+      const extraAssembled = extraAssembler.finish();
+      // Only a complete stream is a sample; a failed extra sample is left out.
+      if (extra.ok && extraAssembled.ok) samples.push(streamSample(extraAssembled));
+      else console.error(`BenchRouter capture sidecar: extra streamed sample not recorded (${extra.ok && !extraAssembled.ok ? extraAssembled.reason : `upstream_status_${extra.status}`})`);
+    }
+  } catch (error) {
+    // The app already has its answer. A failed extra sample leaves the samples taken so far.
+    console.error("BenchRouter capture sidecar: extra sample failed", errorMessage(error instanceof Error ? error : String(error)));
+  }
+  await recordSamples(settings, store, call, samples, selectedModel);
 }
 
 async function handle(settings: CaptureSettings, store: CaptureStore, request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -376,20 +558,19 @@ async function handle(settings: CaptureSettings, store: CaptureStore, request: I
     sendJson(response, 400, { error: { message: "BenchRouter capture forwards only paths on the BenchRouter API origin", code: "capture_target_refused" } });
     return;
   }
-  const target = resolved.href;
-  const method = request.method || "POST";
   const parsed = parseJsonOrNull(body.toString("utf8"));
   const requestJson = parsed !== null && isJsonObject(parsed) ? parsed : null;
-  // SERVE-009: capture never records a stream. A streamed body has no single response
-  // object to store as the reference output.
-  if (requestJson !== null && requestJson.stream === true) {
-    sendJson(response, 400, { error: { message: "BenchRouter capture does not support streaming responses", code: "capture_stream_unsupported" } });
-    return;
-  }
   // ROUTE-001: `route` is the selector. `model` is the route only in the one-field SDK form.
   const route = requestJson !== null && isJsonString(requestJson.route) && requestJson.route.length > 0
     ? requestJson.route
     : requestJson !== null && isJsonString(requestJson.model) ? requestJson.model : "default";
+  const call: CallContext = { requestJson, route, endpoint, target: resolved.href, method: request.method || "POST", body, admitted };
+  // SERVE-009: a streamed call is forwarded as sent and recorded like a buffered one.
+  // Replay strips `stream` later (src/shared/replay-body.ts).
+  if (requestJson !== null && requestJson.stream === true) {
+    await relayStream(settings, store, call, response);
+    return;
+  }
 
   let first: ForwardReply | null = null;
   try {
@@ -397,31 +578,13 @@ async function handle(settings: CaptureSettings, store: CaptureStore, request: I
     const samples: Sample[] = [];
     let selectedModel: string | null = null;
     for (let index = 0; index < settings.samplesTarget; index += 1) {
-      const result = await forwardOnce(settings, target, method, body, admitted);
+      const result = await forwardOnce(settings, call);
       if (index === 0) first = result;
       selectedModel = result.headers.get("x-benchrouter-selected-model") || selectedModel;
       const json = parseJsonOrNull(result.text);
       samples.push({ json, message: extractMessage(json), ok: result.ok });
     }
-    const firstSample = samples[0];
-    if (requestJson !== null && first?.ok && firstSample?.ok) {
-      const redactions: Redaction[] = [];
-      const input = redact(normalizeInput(requestJson), "", settings.redactPaths, redactions);
-      // Redact each message OBJECT (structure-preserving), then store it as JSON text.
-      const outputs = samples.map((sample) => JSON.stringify(redact(sample.message, "reference_output", settings.redactPaths, redactions)));
-      await store.record({
-        route,
-        input: isJsonObject(input) ? input : {},
-        outputs,
-        selectedModel,
-        redactions,
-        dependent: detectDependent(input),
-        endpoint,
-        routing: routingContext(requestJson),
-        headers: admitted,
-        costUsd: extractCost(firstSample.json)
-      });
-    }
+    if (first?.ok) await recordSamples(settings, store, call, samples, selectedModel);
   } catch (error) {
     console.error("BenchRouter capture sidecar:", errorMessage(error instanceof Error ? error : String(error)));
     sendJson(response, 502, { error: { message: "BenchRouter capture sidecar upstream fetch failed" } });
@@ -431,11 +594,7 @@ async function handle(settings: CaptureSettings, store: CaptureStore, request: I
     sendJson(response, 502, { error: { message: "BenchRouter capture sidecar upstream fetch failed" } });
     return;
   }
-  const relay: StringMap = {};
-  first.headers.forEach((value, key) => {
-    if (!UNRELAYED_HEADERS.has(key.toLowerCase())) relay[key] = value;
-  });
-  response.writeHead(first.status, relay);
+  response.writeHead(first.status, relayHeaders(first.headers));
   response.end(first.text);
 }
 
@@ -468,8 +627,15 @@ export async function runCapture(control: ControlContext, stop: AbortSignal): Pr
     routeSlugs: new Map(manifest.routes.map((route) => [route.routeId, route.slug]))
   };
   const store = new CaptureStore(settings);
+  // A streamed call records after its last byte reaches the app, so exit waits for
+  // every call still in flight, not only for queued writes.
+  const inFlight = new Set<Promise<void>>();
   const server = createServer((request, response) => {
-    void handle(settings, store, request, response);
+    const handled = handle(settings, store, request, response).catch((error: Error) => {
+      console.error("BenchRouter capture sidecar:", errorMessage(error instanceof Error ? error : String(error)));
+    });
+    inFlight.add(handled);
+    void handled.finally(() => inFlight.delete(handled));
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -489,8 +655,10 @@ export async function runCapture(control: ControlContext, stop: AbortSignal): Pr
     else stop.addEventListener("abort", () => resolve(), { once: true });
   });
   // Stop taking calls, then let every queued case write finish before exit.
+  // A stream still open is cut, as before, and is not recorded.
   server.close();
   server.closeAllConnections();
+  await Promise.all(inFlight);
   await store.drain();
   return 0;
 }
