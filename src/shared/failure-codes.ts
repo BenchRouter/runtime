@@ -139,6 +139,18 @@ export const UNPRICED_RUN_FAILED_STEP = "unknown_live_cost";
 export const NO_MODEL_CALL_FAILED_STEP = "no_model_call";
 
 /**
+ * EVAL-011 / EVAL-012: the failed step of an executable run none of whose model calls answered
+ * (`unansweredCallsStop`, src/runner/fail-diagnostic.ts). Server-written only.
+ */
+export const NO_MODEL_ANSWER_FAILED_STEP = "no_model_answer";
+
+/**
+ * EVAL-011 / EVAL-012: the arrival-ledger code of a send of a mapped executable model request that
+ * has not been answered yet (`eval_call_arrival_refusals`, one row per send).
+ */
+export const ARRIVAL_SEND_PENDING = "send_pending";
+
+/**
  * EVAL-011: the failed step of a dispatch that the owning account's billing refused. Only the
  * account owner can fix it: `billing_refused` has no available balance (add eval credits),
  * `billing_inactive` has an account that is not active (reactivate billing).

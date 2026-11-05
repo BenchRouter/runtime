@@ -33,11 +33,11 @@ import { ancestryProof, cleanEvalTree, fetchEvalTree } from "./eval-tree";
 import { runExecutableItem } from "./executable";
 import { canonicalJson, errorMessage, objectOf, parseJsonText, ProtocolError, readString, sha256Digest, sleep, type JsonObject } from "./json";
 import { isJsonString } from "../../src/shared/json-parse-contracts";
-import { readManifest, type ManifestRoute } from "./manifest";
+import { readManifest, type Manifest, type ManifestRoute } from "./manifest";
 import { commandPath, itemResidue, killAllGroups, listProcesses, type ItemResidue, type ProcessTable } from "./processes";
 import { ItemFault, runReplayItem, type ItemOutcome } from "./replay";
 import { RunnerApiError, RunnerClient } from "./runner-client";
-import { hashDeclaredFiles, routeContract, sameHashes } from "./snapshot";
+import { DeclaredFileMissing, hashDeclaredFiles, routeContract, sameHashes } from "./snapshot";
 import { JobSummary, type FailureClass } from "./summary";
 import { send, TargetHolds } from "./transport";
 import { readCommittedKit } from "./workflow";
@@ -299,16 +299,25 @@ async function prepare(control: ControlContext, client: RunnerClient, hello: Run
     else summary.unavailableSnapshot(hello.eval_sha);
     return null;
   }
-  const manifest = await readManifest(tree.root);
   const routes: RunnerRouteContract[] = [];
   const byKey = new Map<string, PreparedRoute>();
   // §3.3.5: the case index is sent only to a server that accepts it, by a runtime that runs subsets.
   const reportCaseIndex = control.features.includes("case_subset") && (hello.server_features ?? []).includes("case_index");
-  const evaluatorSecretNames = [...new Set(manifest.routes.flatMap((route) => route.executable?.secretEnv ?? []))].sort();
-  for (const route of manifest.routes) {
-    const contract = await routeContract(tree.root, route, reportCaseIndex);
-    routes.push(contract);
-    byKey.set(route.routeId, { route, fileHashes: contract.file_hashes, evaluatorSecretNames });
+  let manifest: Manifest;
+  try {
+    manifest = await readManifest(tree.root);
+    const evaluatorSecretNames = [...new Set(manifest.routes.flatMap((route) => route.executable?.secretEnv ?? []))].sort();
+    for (const route of manifest.routes) {
+      const contract = await routeContract(tree.root, route, reportCaseIndex);
+      routes.push(contract);
+      byKey.set(route.routeId, { route, fileHashes: contract.file_hashes, evaluatorSecretNames });
+    }
+  } catch (error) {
+    await reportUnreadableTree(client, hello, summary, {
+      message: errorMessage(error instanceof Error ? error : String(error)),
+      missingPath: error instanceof DeclaredFileMissing ? error.path : null
+    });
+    return null;
   }
   const needsAncestry = hello.purpose === "snapshot_refresh" || control.eventName === "push";
   const ancestry = needsAncestry ? await ancestryProof(control, hello.eval_sha, manifest.product.defaultBranch, hello.last_imported_sha) : null;
@@ -344,6 +353,30 @@ async function prepare(control: ControlContext, client: RunnerClient, hello: Run
     prepared.set(digest, entry);
   }
   return prepared;
+}
+
+/**
+ * RUN-001 §3.3.1 / RUN-004: the fetched tree cannot be reported as a snapshot. The job fails with
+ * the local error, and the server learns the bounded cause (and a missing declared file's path)
+ * through the `unavailable` snapshot report, so the PR's status names it instead of saying
+ * nothing (muform PR #5, 2026-11-04). The error text stays in this run (DATA-001).
+ */
+async function reportUnreadableTree(
+  client: RunnerClient,
+  hello: RunnerHelloSession,
+  summary: JobSummary,
+  failure: { message: string; missingPath: string | null }
+): Promise<void> {
+  summary.unreadableTree(failure.message);
+  const cause = failure.missingPath !== null
+    ? { cause: "declared_file_missing" as const, path: failure.missingPath }
+    : { cause: "tree_invalid" as const };
+  try {
+    const response = await client.snapshot({ kind: "unavailable", session_id: hello.session_id, eval_sha: hello.eval_sha, ...cause });
+    if (response.outcome === "blocked") summary.block(response.reason, response.action);
+  } catch (reportError) {
+    summary.note(`BenchRouter could not be told why: ${errorMessage(reportError instanceof Error ? reportError : String(reportError))}`);
+  }
 }
 
 async function claimLoop(

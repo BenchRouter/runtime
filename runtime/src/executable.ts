@@ -7,7 +7,9 @@
 //   3. the customer argv (the runtime or a package runner, never a shell) in its own
 //      process group, with only the eval-call contract (the item's call token and base
 //      URL) and the manifest-declared secret names;
-//   4. the result receipt at `result_path`, parsed into case-result rows.
+//   4. after a successful exit, a copy of the declared `artifacts` into the job's results directory
+//      (EVAL-012; never sent to BenchRouter, never part of the outcome);
+//   5. the result receipt at `result_path`, parsed into case-result rows.
 // Every child is killed (SIGTERM, then SIGKILL after 5 s) at its deadline.
 import type { ChildProcess } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
@@ -24,6 +26,8 @@ import {
   type Sha256Digest
 } from "../../src/shared/runner-protocol";
 import { sdkBaseUrlForApiFamily } from "../../src/shared/sdk-base-url";
+import { evalArtifactRunDirectory } from "../../src/shared/eval-artifacts";
+import { JOB_ARTIFACT_BUDGET, keepEvalArtifacts, pinEvalTree, type PinnedTree } from "./artifacts";
 import { childEnv, installEnv, type ControlContext } from "./control";
 import { isJsonFiniteNumber, isJsonObject, isJsonString, parseJsonText, ProtocolError, type JsonObject, type JsonValue } from "./json";
 import type { ExecutableSpec, ManifestRoute } from "./manifest";
@@ -236,10 +240,13 @@ export async function runExecutableItem(env: ExecutableEnvironment): Promise<Ite
   // private to the item and removed when the item ends; a path outside TMPDIR is not reset.
   await mkdir(control.runnerTemp, { recursive: true });
   const itemTmp = await mkdtemp(path.join(control.runnerTemp, "br-item-"));
+  // EVAL-012: the artifact copy reads the tree as admitted, so the tree is opened before the evaluator starts.
+  const pinnedTree = executable.artifacts.length > 0 ? await pinEvalTree(treeRoot) : null;
   try {
-    return await runEvaluator(env, { executable, pinnedPath, launcherBinary, itemTmp, workDir, workDeadlineAt, evaluatorRuntime, installMs });
+    return await runEvaluator(env, { executable, pinnedPath, launcherBinary, itemTmp, workDir, workDeadlineAt, evaluatorRuntime, installMs, pinnedTree });
   } finally {
     await rm(itemTmp, { recursive: true, force: true });
+    if (pinnedTree !== null && "tree" in pinnedTree) await pinnedTree.tree.close().catch(() => undefined);
   }
 }
 
@@ -252,12 +259,14 @@ interface EvaluatorStage {
   workDeadlineAt: number;
   evaluatorRuntime: RunnerEvaluatorRuntime | null;
   installMs: number;
+  /** EVAL-012: the eval tree opened before the evaluator started; null when the route declares no artifacts. */
+  pinnedTree: PinnedTree | null;
 }
 
-/** Steps 3 and 4 of an executable item: the evaluator process and its result receipt. */
+/** Steps 3 to 5 of an executable item: the evaluator process, its artifacts and its result receipt. */
 async function runEvaluator(env: ExecutableEnvironment, stage: EvaluatorStage): Promise<ItemOutcome> {
   const { control, route, item, treeRoot, signal } = env;
-  const { executable, pinnedPath, launcherBinary, itemTmp, workDir, workDeadlineAt, evaluatorRuntime, installMs } = stage;
+  const { executable, pinnedPath, launcherBinary, itemTmp, workDir, workDeadlineAt, evaluatorRuntime, installMs, pinnedTree } = stage;
   const baseUrl = control.apiOrigin;
   const evaluatorEnv: StringMap = childEnv(control, {
     PATH: pinnedPath,
@@ -292,7 +301,23 @@ async function runEvaluator(env: ExecutableEnvironment, stage: EvaluatorStage): 
     return { kind: "fail", cause: "harness_failed", diagnostics: executionDiagnostic(run), providerOnly: false, evaluatorError };
   }
 
-  // 4. The result receipt.
+  // 4. EVAL-012: the evaluator's side outputs for a person, kept in the job's results directory before
+  // the tree is cleaned for the next item. The copy never changes the outcome and reaches no request.
+  if (pinnedTree !== null) {
+    await keepEvalArtifacts({
+      pinned: pinnedTree,
+      workspace: control.workspace,
+      patterns: executable.artifacts,
+      model: item.model_run.model,
+      runDirectory: evalArtifactRunDirectory({
+        model: item.model_run.model, profile: item.model_run.profile, modelRunId: item.model_run.model_run_id,
+        retryAttempt: item.retry_attempt, leaseGen: item.lease_gen
+      }),
+      budget: JOB_ARTIFACT_BUDGET
+    });
+  }
+
+  // 5. The result receipt.
   const receipt = await readReceipt(path.join(treeRoot, executable.resultPath), executable.primaryMetric, item.model_run.model);
   const timing: RunnerExecutableTiming = env.previousCleanMs === undefined ? { install_ms: installMs } : { install_ms: installMs, previous_clean_ms: env.previousCleanMs };
   return { kind: "upload", rows: receipt.rows, quality: receipt.quality, evaluatorRuntime, timing };
