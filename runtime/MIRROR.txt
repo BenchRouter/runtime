@@ -15,3 +15,5 @@ src/shared/replay-body.ts
 src/shared/case-planning.ts
 src/proxy/stream/sse.ts
 src/proxy/constants.ts
+src/runner/path-globs.ts
+src/shared/eval-artifacts.ts

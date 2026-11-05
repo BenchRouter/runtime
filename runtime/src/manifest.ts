@@ -6,6 +6,7 @@ import path from "node:path";
 import { parse as parseYaml } from "yaml";
 import { isEvalIsolation, isExactRuntimeVersion, locateExecutableLockfile, type EvalIsolation, type RunnerWorkMode } from "../../src/shared/runner-protocol";
 import { parseReplayCaseRepeatPolicy, type ReplayCaseRepeatPolicy } from "../../src/shared/replay-case-repeats";
+import { parseEvalArtifacts } from "../../src/shared/eval-artifacts";
 import { isJsonFiniteNumber, isJsonObject, isJsonString, ProtocolError, type JsonObject, type JsonValue } from "./json";
 
 export const MANIFEST_PATH = ".benchrouter/benchrouter.yml";
@@ -30,6 +31,8 @@ export interface ExecutableSpec {
   primaryMetric: string;
   timeoutMinutes: number;
   secretEnv: string[];
+  /** EVAL-012: side outputs kept for a person after a successful evaluator exit; never hashed. */
+  artifacts: string[];
 }
 
 export interface ManifestRoute {
@@ -147,6 +150,9 @@ function parseExecutable(pack: JsonObject, prefix: string): ExecutableSpec {
   if (secretEnv.some((name) => !isEnvName(name) || ["BENCHROUTER_", "ACTIONS_", "GITHUB_"].some((reserved) => name.startsWith(reserved)))) {
     fail(label("secret_env"), "contains a reserved or invalid name");
   }
+  // EVAL-012: the server's validator, so the runtime and the snapshot accept the same list.
+  const artifacts = parseEvalArtifacts(pack.artifacts, label("artifacts"));
+  if (!artifacts.ok) throw new ProtocolError(`${MANIFEST_PATH}: ${artifacts.message}`);
   const spec: ExecutableSpec = {
     argv: stringList(pack.argv, label("argv")),
     apiFamily: family,
@@ -161,7 +167,8 @@ function parseExecutable(pack: JsonObject, prefix: string): ExecutableSpec {
     resultPath: repoPath(pack.result_path, label("result_path")),
     primaryMetric: requiredString(pack.primary_metric, label("primary_metric")),
     timeoutMinutes: positiveNumber(pack.timeout_minutes, label("timeout_minutes"), true),
-    secretEnv
+    secretEnv,
+    artifacts: artifacts.artifacts ?? []
   };
   if (spec.acceptanceRefs.some((ref) => spec.inputRefs.includes(ref))) fail(label("input_refs"), "and acceptance_refs must not overlap");
   return spec;
@@ -189,6 +196,11 @@ function parseRoute(value: JsonValue, index: number): ManifestRoute {
   // EVAL-014: the eval implementer declares the judge model. There is no default judge.
   const judgeModel = optionalString(pack.judge_model, `${prefix}.eval_pack.judge_model`);
   if (executable && judgeModel) fail(`${prefix}.eval_pack.judge_model`, "applies only to isolated_replay evals");
+  if (!executable) {
+    const artifacts = parseEvalArtifacts(pack.artifacts, `${prefix}.eval_pack.artifacts`);
+    if (!artifacts.ok) throw new ProtocolError(`${MANIFEST_PATH}: ${artifacts.message}`);
+    if (artifacts.artifacts !== null) fail(`${prefix}.eval_pack.artifacts`, "applies only to repository_executable evals");
+  }
   return {
     routeId: requiredString(entry.route_id, `${prefix}.route_id`),
     slug: requiredString(entry.id, `${prefix}.id`),

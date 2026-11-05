@@ -7,9 +7,30 @@ import { loadReplayCases, planningRequirements } from "./cases";
 import { sha256Digest } from "./json";
 import { declaredFiles, type ManifestRoute } from "./manifest";
 
+/**
+ * RUN-001 §3.3.1: a file the route declares is not in the eval tree. `path` is the declared
+ * repository-relative path, which the snapshot report may name (the server stores declared paths).
+ */
+export class DeclaredFileMissing extends Error {
+  constructor(readonly path: string, readonly routeId: string) {
+    super(`route ${routeId} declares ${path}, but the file is not in the eval tree`);
+  }
+}
+
 export async function hashDeclaredFiles(treeRoot: string, route: ManifestRoute): Promise<Record<string, Sha256Digest>> {
   const hashes: Record<string, Sha256Digest> = {};
-  for (const file of declaredFiles(route)) hashes[file] = sha256Digest(await readFile(path.join(treeRoot, file)));
+  for (const file of declaredFiles(route)) {
+    let bytes: Buffer;
+    try {
+      bytes = await readFile(path.join(treeRoot, file));
+    } catch (error) {
+      if (error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "ENOTDIR")) {
+        throw new DeclaredFileMissing(file, route.routeId);
+      }
+      throw error;
+    }
+    hashes[file] = sha256Digest(bytes);
+  }
   return hashes;
 }
 

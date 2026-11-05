@@ -158,6 +158,13 @@ export class JobSummary {
     console.log(`::error title=BenchRouter::the eval commit ${escapeAnnotation(evalSha)} could not be fetched; this route context waits for a snapshot refresh`);
   }
 
+  /** RUN-001 §3.3.1: the fetched eval tree could not be read as a snapshot; the job fails with the error. */
+  unreadableTree(message: string): void {
+    this.protocolError = message;
+    this.outcome = "eval tree unreadable";
+    console.log(`::error title=BenchRouter eval setup failed::${escapeAnnotation(message)}`);
+  }
+
   protocol(message: string): void {
     this.protocolError = message;
     this.outcome = "protocol error";

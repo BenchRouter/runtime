@@ -708,8 +708,18 @@ export interface RunnerAncestryProof {
 }
 
 /**
+ * RUN-001 §3.3.1 / RUN-004: why a session reports no snapshot of `eval_sha`. `fetch_failed` and
+ * `not_found`: the commit could not be fetched (§3.2). `declared_file_missing`: a file a route
+ * declares is not in the fetched tree; the report names it in `path`. `tree_invalid`: the fetched
+ * tree could not be read as an eval tree for another reason (its manifest or cases). The error
+ * text stays in the customer's GitHub run (DATA-001).
+ */
+export const RUNNER_SNAPSHOT_UNAVAILABLE_CAUSES = ["fetch_failed", "not_found", "declared_file_missing", "tree_invalid"] as const;
+export type RunnerSnapshotUnavailableCause = (typeof RUNNER_SNAPSHOT_UNAVAILABLE_CAUSES)[number];
+
+/**
  * §3.8: `kind: "snapshot"` reports the tree at `eval_sha`. `kind: "unavailable"`
- * reports an unfetchable `eval_sha` (§3.2). The server composes the fingerprint and
+ * reports a tree it cannot report, and why (`RunnerSnapshotUnavailableCause`). The server composes the fingerprint and
  * `contract_digest`; it never trusts a client-composed digest.
  *
  * Every session reports its snapshot, so every session learns the digests it sends in
@@ -731,7 +741,14 @@ export type RunnerSnapshotRequest =
       /** Required for a push session or a production `snapshot_refresh`. */
       ancestry: RunnerAncestryProof | null;
     }
-  | { kind: "unavailable"; session_id: string; eval_sha: GitSha; cause: "fetch_failed" | "not_found" };
+  | {
+      kind: "unavailable";
+      session_id: string;
+      eval_sha: GitSha;
+      cause: RunnerSnapshotUnavailableCause;
+      /** `declared_file_missing` only, and required there: the missing file's normalized repository-relative path. */
+      path?: string;
+    };
 
 /**
  * §3.8: `history_rewritten` is true only for an authenticated ancestry reset
