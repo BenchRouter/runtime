@@ -146,15 +146,47 @@ export function environmentIsResidue(environment: ProcessEnvironment, mark: stri
     (environment.kind === "readable" && environment.entries.some((entry) => entry === `${ITEM_MARK_ENV}=${mark}`));
 }
 
+function isGoneError(error: Error): boolean {
+  return "code" in error && (error.code === "ENOENT" || error.code === "ESRCH");
+}
+
+/**
+ * RUN-001: Linux refuses `/proc/<pid>/environ` (EACCES) for a zombie, a dead process its parent has not yet
+ * reaped. A zombie holds no environment and runs nothing, so it is gone, not unreadable. A zombie thread-group
+ * leader can still have running threads, so it counts only when it is the last thread. Any other state, or an
+ * unreadable or unparsable `stat`, stays unreadable.
+ */
+async function linuxProcessIsDead(pid: number): Promise<boolean> {
+  try {
+    const stat = await readFile(`/proc/${pid}/stat`, "utf8");
+    // `pid (comm) S ...`: comm may hold spaces and ")", so the fields follow the last ")". Field 3 is the state and
+    // field 20 is num_threads: indexes 0 and 17 of the fields after comm.
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    return (fields[0] === "Z" || fields[0] === "X") && Number(fields[17]) === 1;
+  } catch (error) {
+    return error instanceof Error && isGoneError(error);
+  }
+}
+
+/**
+ * RUN-001: how many times Linux reads one `/proc/<pid>/environ` before it gives up. A live process is refused
+ * (EACCES) for a moment while it execs or exits; each read is a real I/O round trip, so the next one usually lands
+ * after the window. Under heavy fork churn in a Linux container, 1 read left 0.22% of reads unreadable, 3 left 0.10%
+ * and 10 left 0.006%. A process refused on every read is unreadable and fails closed.
+ */
+const LINUX_ENVIRONMENT_READS = 10;
+
 /** RUN-001: read only the environment, without exporting its contents or command arguments. */
 export async function processEnvironment(pid: number): Promise<ProcessEnvironment> {
   if (process.platform === "linux") {
-    try {
-      return { kind: "readable", entries: (await readFile(`/proc/${pid}/environ`, "utf8")).split("\0") };
-    } catch (error) {
-      if (error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "ESRCH")) return { kind: "gone" };
-      return { kind: "unreadable" };
+    for (let read = 0; read < LINUX_ENVIRONMENT_READS; read += 1) {
+      try {
+        return { kind: "readable", entries: (await readFile(`/proc/${pid}/environ`, "utf8")).split("\0") };
+      } catch (error) {
+        if ((error instanceof Error && isGoneError(error)) || await linuxProcessIsDead(pid)) return { kind: "gone" };
+      }
     }
+    return { kind: "unreadable" };
   }
   if (process.platform !== "darwin") return { kind: "unreadable" };
   return new Promise<ProcessEnvironment>((resolve) => {

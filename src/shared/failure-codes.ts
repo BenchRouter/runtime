@@ -121,7 +121,11 @@ export const EVAL_RUN_FAILURE_REASON_CODES = [
   // EVAL-011 / RUN-001: a case could not be answered because of BenchRouter (settlement, routing
   // contract, credentials, quota, transport, its circuit breaker), so the run measured our
   // failure, not the model. Server-written only; the run is unmeasured and retried.
-  "platform_failure"
+  "platform_failure",
+  // EVAL-013: an extra reasoning trial stopped before any hold admitted a call of it, so it never
+  // ran. It is BenchRouter's planning outcome: server-written only, uncounted, never retried in
+  // its set, and never a result for the model. `failed_step` keeps the refusal code.
+  "trial_not_run"
 ] as const;
 export type EvalRunFailureReasonCode = (typeof EVAL_RUN_FAILURE_REASON_CODES)[number];
 
@@ -198,7 +202,8 @@ export const EVAL_RUN_FAILURE_REASON_CODE = {
   livenessExpired: "liveness_expired",
   prRerunFailed: "pr_rerun_failed",
   cancelled: "cancelled",
-  orphanedBeforeDispatch: "orphaned_before_dispatch"
+  orphanedBeforeDispatch: "orphaned_before_dispatch",
+  trialNotRun: "trial_not_run"
 } as const satisfies Record<string, EvalRunFailureReasonCode>;
 
 export interface EvalSucceededCaseDiagnostic {
@@ -603,7 +608,8 @@ function parseDiagnostic<Value>(value: Value, stored: boolean): ParseFailureDiag
   if (!member(EVAL_RUN_FAILURE_SOURCES, value.source)) return invalid("Failure diagnostic source is invalid");
   if (!member(EVAL_RUN_FAILURE_REASON_CODES, value.reason_code)) return invalid("Failure diagnostic reason_code is invalid");
   // An upload never reports an outage: the server decides it from the stored case results.
-  if (!stored && (value.reason_code === "provider_outage" || value.reason_code === "platform_failure")) {
+  // EVAL-013: nor a trial that never ran, which the server reads from its holds.
+  if (!stored && (value.reason_code === "provider_outage" || value.reason_code === "platform_failure" || value.reason_code === "trial_not_run")) {
     return invalid("Failure diagnostic reason_code is invalid");
   }
   const failedStep = nullableText(value.failed_step, MAX_SMALL, true);
