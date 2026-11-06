@@ -17,3 +17,4 @@ src/proxy/stream/sse.ts
 src/proxy/constants.ts
 src/runner/path-globs.ts
 src/shared/eval-artifacts.ts
+src/shared/calibration-template.ts
