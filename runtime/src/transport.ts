@@ -22,6 +22,8 @@ export interface HttpRequest {
   target: string;
   /** Extra statuses that retry (besides network errors, 429 and 5xx), e.g. 409 while a call settles. */
   retryWhen?: (reply: HttpReply) => boolean;
+  /** The tier model endpoint publishes its retry decision with the original operation. */
+  honorRetryHeader?: boolean;
   /** Attempts in total (default 6). */
   maxAttempts?: number;
   /** Checked before every attempt, retries included; false stops with `aborted`. */
@@ -116,7 +118,8 @@ export async function send(request: HttpRequest, holds: TargetHolds): Promise<Ht
       continue;
     }
     lastReply = reply;
-    const retryable = RETRY_STATUSES.has(reply.status) || (request.retryWhen?.(reply) ?? false);
+    const hint = request.honorRetryHeader ? reply.headers.get("x-should-retry") : null;
+    const retryable = hint === null ? RETRY_STATUSES.has(reply.status) || (request.retryWhen?.(reply) ?? false) : hint === "true";
     if (!retryable || attempt === maxAttempts - 1) return reply;
     lastError = `HTTP ${reply.status}`;
     const after = retryAfterMs(reply);

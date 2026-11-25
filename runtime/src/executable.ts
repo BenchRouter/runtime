@@ -17,7 +17,7 @@ import { access, mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises
 import path from "node:path";
 import type { EvalExecutionFailureReason } from "../../src/shared/failure-codes";
 import {
-  isExactRuntimeVersion,
+  isExactRuntimeVersion, isTierEvalBearer,
   RUNNER_EXECUTABLE_LAUNCHERS,
   RUNNER_PNPM_LOCKFILE,
   type RunnerEvaluatorRuntime,
@@ -34,8 +34,9 @@ import type { ExecutableSpec, ManifestRoute } from "./manifest";
 import { ITEM_MARK_ENV, killGroup, spawnGroup } from "./processes";
 import type { ItemOutcome, UploadRow } from "./replay";
 import { ItemFault } from "./replay";
+import { openEvalProxy } from "./eval-proxy";
 import { hashDeclaredFiles, sameHashes } from "./snapshot";
-import { BoundedCapture, buildExcerpt } from "./stderr-excerpt";
+import { BoundedCapture, buildExcerpt, redactCredential } from "./stderr-excerpt";
 import type { StringMap } from "./transport";
 
 /** §7.3 decision 1: the names the install child sees the registry grant under. */
@@ -73,7 +74,7 @@ const STDERR_DRAIN_MS = 2_000;
  * With `stderr`, the child's stderr is piped: every chunk goes on to this process's
  * stderr unchanged, so the job log stays the same, and a bounded copy is kept.
  */
-function runGroup(argv: string[], cwd: string, env: StringMap, deadlineAt: number, signal: AbortSignal, itemMark: string, captureStdout = false, stderr: BoundedCapture | null = null): Promise<ProcessOutcome> {
+function runGroup(argv: string[], cwd: string, env: StringMap, deadlineAt: number, signal: AbortSignal, itemMark: string, captureStdout = false, stderr: BoundedCapture | null = null, credential?: string): Promise<ProcessOutcome> {
   return new Promise((resolve) => {
     const [command, ...args] = argv;
     // An abort that landed before the spawn (a fence during install or hashing) starts nothing.
@@ -83,21 +84,25 @@ function runGroup(argv: string[], cwd: string, env: StringMap, deadlineAt: numbe
     }
     let child: ChildProcess;
     try {
-      child = spawnGroup(command, args, { cwd, env: { ...env, [ITEM_MARK_ENV]: itemMark }, stdio: ["ignore", captureStdout ? "pipe" : "inherit", stderr === null ? "inherit" : "pipe"] });
+      child = spawnGroup(command, args, { cwd, env: { ...env, [ITEM_MARK_ENV]: itemMark }, stdio: ["ignore", captureStdout || credential ? "pipe" : "inherit", stderr === null ? "inherit" : "pipe"] });
     } catch {
       resolve({ exitCode: null, signal: null, timedOut: false, startFailed: true, stdout: "" });
       return;
     }
     let stdout = "";
-    child.stdout?.on("data", (chunk: Buffer) => { if (stdout.length < 4096) stdout += chunk.toString("utf8"); });
-    let stderrEnded = child.stderr === null;
-    const stderrDone: Promise<void> = child.stderr === null ? Promise.resolve() : new Promise((done) => {
-      child.stderr?.on("data", (chunk: Buffer) => {
-        process.stderr.write(chunk);
-        stderr?.push(chunk);
-      });
-      child.stderr?.once("close", () => { stderrEnded = true; done(); });
-    });
+    const readers: Promise<void>[] = [];
+    if (credential && child.stdout) {
+      readers.push(redactCredential(child.stdout, credential, bytes => process.stdout.write(bytes)));
+    } else {
+      child.stdout?.on("data", (chunk: Buffer) => { if (stdout.length < 4096) stdout += chunk.toString("utf8"); });
+    }
+    if (child.stderr) {
+      readers.push(redactCredential(child.stderr, credential, bytes => {
+        process.stderr.write(bytes);
+        stderr?.push(bytes);
+      }));
+    }
+    const outputDone = Promise.all(readers);
     let timedOut = false;
     const stop = () => { void killGroup(child); };
     const timer = setTimeout(() => { timedOut = true; stop(); }, Math.max(0, deadlineAt - Date.now()));
@@ -112,13 +117,13 @@ function runGroup(argv: string[], cwd: string, env: StringMap, deadlineAt: numbe
       // A grandchild the evaluator left behind never outlives the item.
       void killGroup(child);
       const outcome: ProcessOutcome = { exitCode: code, signal: exitSignal, timedOut, startFailed: false, stdout };
-      if (stderrEnded) {
+      if (readers.length === 0) {
         finish(outcome);
         return;
       }
       // The last stderr chunks can arrive after `exit`; wait for them, but never for long.
       const drain = setTimeout(() => finish(outcome), STDERR_DRAIN_MS);
-      void stderrDone.then(() => { clearTimeout(drain); finish(outcome); });
+      void outputDone.then(() => { clearTimeout(drain); finish(outcome); });
     });
   });
 }
@@ -267,11 +272,14 @@ interface EvaluatorStage {
 async function runEvaluator(env: ExecutableEnvironment, stage: EvaluatorStage): Promise<ItemOutcome> {
   const { control, route, item, treeRoot, signal } = env;
   const { executable, pinnedPath, launcherBinary, itemTmp, workDir, workDeadlineAt, evaluatorRuntime, installMs, pinnedTree } = stage;
-  const baseUrl = control.apiOrigin;
+  // A receipt left in the tree never counts: only one this evaluator run writes does.
+  await rm(path.join(treeRoot, executable.resultPath), { force: true });
+  const bridge = isTierEvalBearer(item.call_token) ? await openEvalProxy(control.apiOrigin, item, signal) : null;
+  const baseUrl = bridge?.baseUrl ?? control.apiOrigin;
   const evaluatorEnv: StringMap = childEnv(control, {
     PATH: pinnedPath,
     TMPDIR: itemTmp,
-    BENCHROUTER_API_KEY: item.call_token,
+    BENCHROUTER_API_KEY: bridge?.token ?? item.call_token,
     BENCHROUTER_EVAL_BASE_URL: baseUrl,
     BENCHROUTER_ROUTE_ID: route.routeId
   });
@@ -283,20 +291,19 @@ async function runEvaluator(env: ExecutableEnvironment, stage: EvaluatorStage): 
     const value = control.stepEnv.get(name);
     if (value !== undefined && value.length > 0) evaluatorEnv[name] = value;
   }
-  // A receipt left in the tree never counts: only one this evaluator run writes does.
-  await rm(path.join(treeRoot, executable.resultPath), { force: true });
   const timeoutAt = Math.min(workDeadlineAt, Date.now() + executable.timeoutMinutes * 60_000);
   const evaluatorArgv = [launcherBinary, ...executable.argv.slice(1)];
   // The call token never shows in the job log, whatever the evaluator prints.
   console.log(`::add-mask::${item.call_token}`);
+  if (bridge) console.log(`::add-mask::${bridge.token}`);
   const stderr = new BoundedCapture();
-  const run = await runGroup(evaluatorArgv, workDir, evaluatorEnv, timeoutAt, signal, env.itemMark, false, stderr);
+  const run = await runGroup(evaluatorArgv, workDir, evaluatorEnv, timeoutAt, signal, env.itemMark, false, stderr, bridge?.token).finally(() => bridge?.close());
   if (signal.aborted) throw abortFault(signal);
   if (run.timedOut && timeoutAt >= workDeadlineAt) throw new ItemFault("deadline_exceeded", "the evaluator ran past the work deadline");
   if (run.startFailed || run.timedOut || run.signal !== null || run.exitCode !== 0) {
     // RUN-001 §3.11 / DATA-001: the excerpt stays in the job summary and annotations; it is
     // never part of `diagnostics` or any other request body.
-    const secrets = [item.call_token, ...executable.secretEnv.map((name) => evaluatorEnv[name] ?? ""), control.installNpmToken ?? ""];
+    const secrets = [item.call_token, bridge?.token ?? "", ...executable.secretEnv.map((name) => evaluatorEnv[name] ?? ""), control.installNpmToken ?? ""];
     const evaluatorError = buildExcerpt(stderr, secrets, endingText(run));
     return { kind: "fail", cause: "harness_failed", diagnostics: executionDiagnostic(run), providerOnly: false, evaluatorError };
   }

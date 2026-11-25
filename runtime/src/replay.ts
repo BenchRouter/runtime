@@ -13,7 +13,7 @@ import {
   type EvalRunFailureDiagnostic
 } from "../../src/shared/failure-codes";
 import {
-  RUNNER_EVAL_CALL_HEADER,
+  RUNNER_EVAL_CALL_HEADER, isTierEvalBearer, runnerEvalSendKey,
   type RunnerCallRole,
   type RunnerEvalCallHeader,
   type RunnerEvaluatorRuntime,
@@ -47,7 +47,7 @@ const PROXY_MAX_ATTEMPTS = 3;
 /** The only paths a replay or judge call may target on the API origin. */
 export const REPLAY_ENDPOINTS: ReadonlySet<string> = new Set(["/v1/chat/completions", "/v1/messages", "/v1/responses"]);
 /** Ledger statuses (§3.3.2) that mean "the same operation is settling; retry the same op later". */
-const SETTLING_CODES = new Set(["call_in_progress", "call_outcome_unknown"]);
+const SETTLING_CODES = new Set(["call_in_progress", "call_outcome_unknown", "idempotency_in_progress"]);
 
 /** A fault that ends the whole item, not one case. */
 export class ItemFault extends Error {
@@ -441,6 +441,7 @@ async function proxyCall(env: ItemEnvironment, header: RunnerEvalCallHeader, end
     throw new ItemFault("harness_failed", `refusing the call endpoint ${JSON.stringify(endpoint)}`);
   }
   const role: RunnerCallRole = header.role;
+  const tier = isTierEvalBearer(env.item.call_token);
   const target = role === "judge" ? `judge:${env.route.routeId}` : `model:${env.item.model_run.model}`;
   let reply: HttpReply;
   try {
@@ -449,6 +450,7 @@ async function proxyCall(env: ItemEnvironment, header: RunnerEvalCallHeader, end
       url: url.href,
       headers: {
         ...extraHeaders,
+        ...(tier && { "idempotency-key": await runnerEvalSendKey(env.item.work_id, env.item.retry_attempt, header) }),
         authorization: `Bearer ${env.item.call_token}`,
         "content-type": "application/json",
         [RUNNER_EVAL_CALL_HEADER]: encodeCallHeader(header)
@@ -461,6 +463,7 @@ async function proxyCall(env: ItemEnvironment, header: RunnerEvalCallHeader, end
       // §3.3.4: an HTTP retry is a new call start; it needs a live lease too.
       beforeAttempt: env.callsAllowed,
       retryWhen: (candidate) => candidate.status === 409 && SETTLING_CODES.has(errorCodeOf(candidate) ?? ""),
+      honorRetryHeader: tier,
       signal: env.signal
     }, env.holds);
   } catch (error) {
@@ -472,6 +475,12 @@ async function proxyCall(env: ItemEnvironment, header: RunnerEvalCallHeader, end
     throw new CaseFault(stage, error.reason === "unreachable" ? EVAL_CASE_ERROR_CODE.transportFetchFailed : EVAL_CASE_ERROR_CODE.upstreamTimeout, null);
   }
   const code = errorCodeOf(reply);
+  if (tier) {
+    if (code === "identity_conflict") throw new ItemFault("nondeterministic_request", "the request changed under a claimed send token");
+    if (code === "eval_operation_expired") throw new ItemFault("call_response_expired", "the eval response is no longer available");
+    if (code === "eval_lease_fenced" || code === "eval_lease_revoked" || code === "eval_lease_expired")
+      throw new ItemFault("lease_lost", `the proxy refused the eval lease: ${code}`);
+  }
   if (reply.status === 409 && code === "call_body_changed") throw new ItemFault("nondeterministic_request", "the proxy refused a changed request body under the same operation");
   if (reply.status === 410 && code === "call_response_expired") throw new ItemFault("call_response_expired", "the stored response of an operation expired");
   if (code === "fenced" || code === "session_expired") throw new ItemFault("lease_lost", `the proxy refused the call: ${code}`);

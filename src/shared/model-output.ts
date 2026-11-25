@@ -89,6 +89,26 @@ export function extractAssistantMessage(parsed: JsonObject): string {
   return "";
 }
 
+function replyForEndpoint(parsed: JsonObject, endpoint: string): JsonObject {
+  switch (endpoint) {
+    case "/v1/chat/completions":
+      return { choices: parsed.choices ?? null };
+    case "/v1/messages":
+      return { role: parsed.role ?? "assistant", content: parsed.content ?? null, stop_reason: parsed.stop_reason ?? null };
+    case "/v1/responses":
+      return { output: parsed.output ?? null, status: parsed.status ?? null, incomplete_details: parsed.incomplete_details ?? null };
+    default:
+      return {};
+  }
+}
+
+/** EVAL-002: use the requested endpoint to select the reply envelope for hosted scoring. */
+export function extractAssistantMessageForEndpoint(parsed: JsonObject, endpoint: string): string {
+  const reply = replyForEndpoint(parsed, endpoint);
+  if (Array.isArray(reply.content)) return JSON.stringify(reply);
+  return extractAssistantMessage(reply);
+}
+
 /** A stored value as an assistant-message envelope, or null (a plain content string). */
 export function parseMessage(stored: JsonValue | undefined): JsonObject | null {
   if (stored === undefined || !isJsonString(stored) || stored.length === 0) return null;
@@ -203,6 +223,12 @@ export function structuralOutcome(parsed: JsonObject, finishReason: string | nul
   const answer = responseAnswer(parsed);
   if (answer.hasRefusal || answer.hasToolCalls || answer.text.trim().length > 0) return null;
   return { code: OUTCOME.outputEmpty, message: `${OUTCOME.outputEmpty}: the model returned no content` };
+}
+
+/** EVAL-002: use the same reply envelope for diagnostics as for hosted scoring. */
+export function structuralOutcomeForEndpoint(parsed: JsonObject, endpoint: string): ReturnType<typeof structuralOutcome> {
+  const reply = replyForEndpoint(parsed, endpoint);
+  return structuralOutcome(reply, completionFinishReason(reply));
 }
 
 // EVAL-011: the judge reply's JSON Schema check is shared with the server, which
