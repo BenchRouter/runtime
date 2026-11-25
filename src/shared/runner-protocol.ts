@@ -177,7 +177,7 @@ export type RunnerReplaySemanticsFeature = (typeof RUNNER_REPLAY_SEMANTICS_FEATU
  * second executable item only to a session that advertised it. The runtime leaves it out when the
  * eval job declares `services`.
  */
-export const RUNNER_FEATURE_CAPABILITIES = ["case_subset", "case_repeats", "pnpm_install", "package_runner_launch", "executable_queue", ...RUNNER_REPLAY_SEMANTICS_FEATURES] as const;
+export const RUNNER_FEATURE_CAPABILITIES = ["case_subset", "case_repeats", "pnpm_install", "package_runner_launch", "executable_queue", "tier_eval_sends", ...RUNNER_REPLAY_SEMANTICS_FEATURES] as const;
 export type RunnerFeatureCapability = (typeof RUNNER_FEATURE_CAPABILITIES)[number];
 
 /**
@@ -422,6 +422,20 @@ export interface RunnerExecutableCallSeq {
  * src/shared/parsing.ts.
  */
 export const RUNNER_EVAL_CALL_HEADER = "x-benchrouter-eval-call";
+// Only runtime-generated sends can advance after an accepted case retry.
+export const RUNNER_AUTO_SEND_PREFIX = "br-auto:";
+
+export function isTierEvalBearer(token: string): boolean {
+  return token.length === 64 && Array.from(token).every(character => "0123456789abcdef".includes(character));
+}
+
+// Each model/judge call has a deterministic position in a replay case, including its trial.
+// A replacement runner reconstructs that send's token without using the new bearer or body.
+export async function runnerEvalSendKey(workId: string, retryAttempt: number, header: RunnerEvalCallHeader): Promise<string> {
+  const bytes = new TextEncoder().encode(JSON.stringify([workId, retryAttempt, header.case_id, header.trial, header.role, header.seq]));
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  return RUNNER_AUTO_SEND_PREFIX + Array.from(digest, value => value.toString(16).padStart(2, "0")).join("");
+}
 
 /**
  * §3.3.2: the child-supplied part of a call's identity. Replay sends `seq` in its

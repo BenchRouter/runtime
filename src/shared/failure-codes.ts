@@ -1,3 +1,4 @@
+import { classifyEvalCallCause, evalCaseCallCode } from "./eval-call-cause";
 import {
   isJsonBoolean,
   isJsonFiniteNumber,
@@ -305,8 +306,9 @@ export function isProviderFailureCode(code: string | null | undefined): code is 
 
 /** EVAL-011: the provider outcome code that names why one failed model call failed. */
 export function providerFailureCode(failure: EvalFailedCaseDiagnostic): EvalProviderFailureCode {
-  if (failure.error_code === "upstream_timeout" || failure.cause_code === "upstream_timeout") return "provider_timeout";
-  if (failure.cause_code === "upstream_rate_limited" || failure.cause_code === "429") return "provider_rate_limited";
+  const kind = classifyEvalCallCause(evalCaseCallCode(failure.error_code, failure.cause_code));
+  if (kind === "timeout") return "provider_timeout";
+  if (kind === "rate_limit") return "provider_rate_limited";
   if (failure.cause_code === "upstream_request_rejected") return "provider_rejected";
   if (failure.cause_code === "model_unavailable" || failure.cause_code === "target_temporarily_unroutable") return "provider_unavailable";
   return "provider_error";
@@ -384,6 +386,8 @@ export interface EvalRunFailureDiagnostic {
    * cases failed at the provider, and the most common cause. Server-written only.
    */
   provider_outage?: ProviderOutageStop;
+  /** EVAL-010: the server checked every raw outage cause before summarizing it for display. */
+  availability_only?: boolean;
   /**
    * EVAL-011: the BenchRouter failures of a `platform_failure` run: how many of its planned
    * cases it could not answer, and the most common cause code. Server-written only.
@@ -600,7 +604,7 @@ function parseDiagnostic<Value>(value: Value, stored: boolean): ParseFailureDiag
   const allowed = new Set([
     "v", "source", "reason_code", "failed_step", "github_conclusion", "cases",
     "execution",
-    ...(stored ? ["verification", "diagnostic_rejected", "retry", "runtime_reason", "spend_bound", "time_bound", "provider_outage", "platform_failure", "model_refusal"] : [])
+    ...(stored ? ["verification", "diagnostic_rejected", "retry", "runtime_reason", "spend_bound", "time_bound", "provider_outage", "availability_only", "platform_failure", "model_refusal"] : [])
   ]);
   const unknown = unknownKey(value, allowed);
   if (unknown) return invalid(`Failure diagnostic ${unknown} is not allowed`);
@@ -659,6 +663,7 @@ function parseDiagnostic<Value>(value: Value, stored: boolean): ParseFailureDiag
     // EVAL-011: display detail only; an unreadable one is dropped the same way.
     const timeBound = parseTimeBoundStop(value.time_bound);
     if (timeBound !== null) result.time_bound = timeBound;
+    if (isJsonBoolean(value.availability_only)) result.availability_only = value.availability_only;
     const outage = parseProviderOutageStop(value.provider_outage);
     if (outage !== null) result.provider_outage = outage;
     const platform = parsePlatformFailureStop(value.platform_failure);

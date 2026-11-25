@@ -1,3 +1,4 @@
+import type { Readable } from "node:stream";
 // RUN-001 §3.11 / DATA-001: the evaluator's error, shown in the customer's own GitHub.
 // The runtime keeps a bounded copy of the evaluator's stderr while it forwards every
 // chunk to the job log unchanged. On an evaluator failure it builds a local excerpt:
@@ -186,4 +187,27 @@ export function buildExcerpt(capture: BoundedCapture, secrets: readonly string[]
     chars += line.length + 1;
   }
   return { errorLine: named === null ? null : clip(named.trim(), ERROR_LINE_CHARS), tail: picked.join("\n"), ending };
+}
+
+// A credential may span any two child writes. Keep its matching suffix between chunks.
+export function redactCredential(input: Readable, credential: string | undefined, write: (bytes: Buffer) => void): Promise<void> {
+  const needle = credential ? Buffer.from(credential) : null;
+  let pending = Buffer.alloc(0);
+  return new Promise(resolve => {
+    input.on("data", (chunk: Buffer) => {
+      if (!needle) { write(chunk); return; }
+      let bytes = pending.length ? Buffer.concat([pending, chunk]) : chunk;
+      let index;
+      while ((index = bytes.indexOf(needle)) !== -1) {
+        write(bytes.subarray(0, index));
+        write(Buffer.from(REDACTED));
+        bytes = bytes.subarray(index + needle.length);
+      }
+      let keep = Math.min(needle.length - 1, bytes.length);
+      while (keep && !bytes.subarray(bytes.length - keep).equals(needle.subarray(0, keep))) keep--;
+      write(bytes.subarray(0, bytes.length - keep));
+      pending = Buffer.from(bytes.subarray(bytes.length - keep));
+    });
+    input.once("close", () => { write(pending); resolve(); });
+  });
 }

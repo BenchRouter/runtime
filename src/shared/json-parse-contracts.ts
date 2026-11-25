@@ -39,6 +39,10 @@ export function isJsonString<Value>(value: Value): value is Extract<Value, strin
   return typeof value === "string";
 }
 
+export function isJsonNumber<Value>(value: Value): value is Extract<Value, number> {
+  return typeof value === "number";
+}
+
 export function isJsonFiniteNumber<Value>(value: Value): value is Extract<Value, number> {
   return typeof value === "number" && Number.isFinite(value);
 }
